@@ -24,9 +24,10 @@ app.get('/api/busestrams_get', async (req, res) => {
     try {
         const { resource_id, apikey, type, line, brigade } = req.query;
         
+        // Use POST instead of GET for busestrams_get as per documentation examples (often more reliable)
+        // Although docs say both work, POST is explicitly used in example #1 and #2.
         const targetUrl = 'https://api.um.warszawa.pl/api/action/busestrams_get/';
         
-        // Default resource_id for vehicles: f2e5503e-927d-4ad3-9500-4ab9e55deb59
         const params = {
             resource_id: resource_id || 'f2e5503e-927d-4ad3-9500-4ab9e55deb59',
             apikey: apikey || '34574ba5-4ce4-432b-ae87-0c26cec9809b',
@@ -39,15 +40,25 @@ app.get('/api/busestrams_get', async (req, res) => {
             logParams.apikey = logParams.apikey.substring(0, 5) + '...';
         }
 
-        console.log(`[Proxy] Requesting Warsaw API (Vehicles): ${targetUrl}`);
-        console.log(`[Proxy] Params:`, JSON.stringify(logParams));
+        console.log(`[Proxy] Requesting Warsaw API (Vehicles) via POST: ${targetUrl}`);
+        console.log(`[Proxy] Params being sent:`, JSON.stringify(logParams));
 
-        const response = await axios.get(targetUrl, {
-            params,
+        // Switch to POST request
+        // Note: Warsaw API expects params in query string even for POST sometimes, or body.
+        // Let's try sending params as query params in URL even with POST, as per curl example:
+        // curl -X POST .../busestrams_get/?resource_id=...
+        
+        const response = await axios.post(targetUrl, null, {
+            params, // axios sends these as query parameters ?key=value
             timeout: 30000 
         });
 
         console.log(`[Proxy] Success! Status: ${response.status}`);
+        const dataPreview = Array.isArray(response.data.result) 
+            ? `Array(${response.data.result.length})` 
+            : typeof response.data.result;
+        console.log(`[Proxy] Data result type: ${dataPreview}`);
+
         res.json(response.data);
     } catch (error) {
         handleProxyError(error, res);
@@ -57,16 +68,11 @@ app.get('/api/busestrams_get', async (req, res) => {
 // Proxy endpoint for dbtimetable_get (Timetables, Stops, Lines)
 app.get('/api/dbtimetable_get', async (req, res) => {
     try {
-        // Supported IDs from spec:
-        // Stops list: ab75c33d-3a26-4342-b36a-6e5fef0a3ac3
-        // Lines at stop: 88cd555f-6f31-43ca-9de4-66c479ad5942
-        // Schedules: e923fa0e-d96c-43f9-ae6e-60518c9f3238
-        
         const { id, apikey, busstopId, busstopNr, line } = req.query;
         const targetUrl = 'https://api.um.warszawa.pl/api/action/dbtimetable_get/';
 
         const params = {
-            id: id, // ID is mandatory for this endpoint to know what to fetch
+            id: id,
             apikey: apikey || '34574ba5-4ce4-432b-ae87-0c26cec9809b',
             busstopId,
             busstopNr,
@@ -79,7 +85,7 @@ app.get('/api/dbtimetable_get', async (req, res) => {
              logParams.apikey = logParams.apikey.substring(0, 5) + '...';
         }
 
-        console.log(`[Proxy] Requesting Warsaw API (Timetables): ${targetUrl}`);
+        console.log(`[Proxy] Requesting Warsaw API (Timetables) via GET: ${targetUrl}`);
         console.log(`[Proxy] Params:`, JSON.stringify(logParams));
 
         const response = await axios.get(targetUrl, {
@@ -99,17 +105,18 @@ function handleProxyError(error, res) {
     console.error(`- Message: ${error.message}`);
     
     if (error.code === 'ECONNABORTED') {
-         console.error('- Timeout exceeded.');
+         console.error('- Timeout exceeded. The Warsaw API is too slow or blocking Railway IP.');
          res.status(504).json({ 
              error: 'Gateway Timeout', 
-             message: 'The Warsaw API took too long to respond (over 30s).',
+             message: 'The Warsaw API took too long to respond (over 30s). This usually indicates the Railway IP is blocked by ZTM.',
              details: error.message
          });
     } else if (error.response) {
         console.error(`- API Status: ${error.response.status}`);
+        console.error(`- API Data:`, JSON.stringify(error.response.data));
         res.status(error.response.status).json(error.response.data);
     } else if (error.request) {
-        console.error('- No response received');
+        console.error('- No response received from upstream');
         res.status(502).json({ error: 'Bad Gateway', message: 'No response from upstream server' });
     } else {
         res.status(500).json({ error: 'Proxy request failed', message: error.message });
