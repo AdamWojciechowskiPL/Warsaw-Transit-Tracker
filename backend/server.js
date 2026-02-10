@@ -8,9 +8,6 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// Serve static files from the root directory (where index.html is)
-app.use(express.static(path.join(__dirname, '..')));
-
 // API Health check
 app.get('/api/health', (req, res) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -53,7 +50,10 @@ app.use('/api/*', (req, res) => {
     res.status(404).json({ error: 'API endpoint not found' });
 });
 
-// Catch-all route to serve index.html (SPA support)
+// Serve static files from the root directory (where index.html is)
+app.use(express.static(path.join(__dirname, '..')));
+
+// Catch-all route to serve index.html (SPA support) - MUST BE LAST
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../index.html'));
 });
