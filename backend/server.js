@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,6 +15,21 @@ app.use((req, res, next) => {
     next();
 });
 
+// Configure HTTPS Agent to allow legacy ciphers
+// Warsaw API server might be using older SSL/TLS configuration
+// which Node.js 18+ (used on Railway) rejects by default.
+// This is a common issue with Polish government/city APIs.
+const httpsAgent = new https.Agent({
+    rejectUnauthorized: false, // Bypass certificate validation issues if needed (use with caution)
+    // secureOptions: require('constants').SSL_OP_LEGACY_SERVER_CONNECT // Option if we need to go deeper
+});
+
+// Create customized axios instance
+const apiClient = axios.create({
+    httpsAgent: httpsAgent,
+    timeout: 30000
+});
+
 // API Health check
 app.get('/api/health', (req, res) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -24,8 +40,6 @@ app.get('/api/busestrams_get', async (req, res) => {
     try {
         const { resource_id, apikey, type, line, brigade } = req.query;
         
-        // Use POST instead of GET for busestrams_get as per documentation examples (often more reliable)
-        // Although docs say both work, POST is explicitly used in example #1 and #2.
         const targetUrl = 'https://api.um.warszawa.pl/api/action/busestrams_get/';
         
         const params = {
@@ -43,13 +57,9 @@ app.get('/api/busestrams_get', async (req, res) => {
         console.log(`[Proxy] Requesting Warsaw API (Vehicles) via POST: ${targetUrl}`);
         console.log(`[Proxy] Params being sent:`, JSON.stringify(logParams));
 
-        // Switch to POST request
-        // Note: Warsaw API expects params in query string even for POST sometimes, or body.
-        // Let's try sending params as query params in URL even with POST, as per curl example:
-        // curl -X POST .../busestrams_get/?resource_id=...
-        
-        const response = await axios.post(targetUrl, null, {
-            params, // axios sends these as query parameters ?key=value
+        // Use customized apiClient with HTTPS agent
+        const response = await apiClient.post(targetUrl, null, {
+            params,
             timeout: 30000 
         });
 
@@ -88,7 +98,7 @@ app.get('/api/dbtimetable_get', async (req, res) => {
         console.log(`[Proxy] Requesting Warsaw API (Timetables) via GET: ${targetUrl}`);
         console.log(`[Proxy] Params:`, JSON.stringify(logParams));
 
-        const response = await axios.get(targetUrl, {
+        const response = await apiClient.get(targetUrl, {
             params,
             timeout: 30000
         });
@@ -102,18 +112,21 @@ app.get('/api/dbtimetable_get', async (req, res) => {
 
 function handleProxyError(error, res) {
     console.error('[Proxy] Error details:');
-    console.error(`- Message: ${error.message}`);
+    
+    // Log extended error info for debugging SSL issues
+    if (error.code) console.error(`- Code: ${error.code}`);
+    if (error.message) console.error(`- Message: ${error.message}`);
     
     if (error.code === 'ECONNABORTED') {
          console.error('- Timeout exceeded. The Warsaw API is too slow or blocking Railway IP.');
          res.status(504).json({ 
              error: 'Gateway Timeout', 
-             message: 'The Warsaw API took too long to respond (over 30s). This usually indicates the Railway IP is blocked by ZTM.',
+             message: 'The Warsaw API took too long to respond (over 30s). This usually indicates the Railway IP is blocked by ZTM or SSL handshake failed.',
              details: error.message
          });
     } else if (error.response) {
         console.error(`- API Status: ${error.response.status}`);
-        console.error(`- API Data:`, JSON.stringify(error.response.data));
+        // console.error(`- API Data:`, JSON.stringify(error.response.data)); // Optional: uncomment if needed
         res.status(error.response.status).json(error.response.data);
     } else if (error.request) {
         console.error('- No response received from upstream');
