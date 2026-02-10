@@ -45,7 +45,7 @@ app.get('/api/busestrams_get', async (req, res) => {
 
         const response = await axios.get(targetUrl, {
             params,
-            timeout: 10000 // Increased timeout to 10s
+            timeout: 30000 // Increased timeout to 30s to handle slow API responses
         });
 
         console.log(`[Proxy] Success! Status: ${response.status}`);
@@ -61,14 +61,21 @@ app.get('/api/busestrams_get', async (req, res) => {
         console.error(`- Message: ${error.message}`);
         console.error(`- Code: ${error.code}`);
         
-        if (error.response) {
+        if (error.code === 'ECONNABORTED') {
+             console.error('- Timeout exceeded. The Warsaw API is too slow or blocking Railway IP.');
+             res.status(504).json({ 
+                 error: 'Gateway Timeout', 
+                 message: 'The Warsaw API took too long to respond (over 30s). This might be due to high load or IP blocking.',
+                 details: error.message
+             });
+        } else if (error.response) {
             console.error(`- API Status: ${error.response.status}`);
             console.error(`- API Headers:`, JSON.stringify(error.response.headers));
             console.error(`- API Data:`, JSON.stringify(error.response.data));
             res.status(error.response.status).json(error.response.data);
         } else if (error.request) {
             console.error('- No response received from Warsaw API');
-            res.status(504).json({ error: 'No response from upstream server', details: error.message });
+            res.status(502).json({ error: 'Bad Gateway', message: 'No response from upstream server', details: error.message });
         } else {
             console.error('- Request setup failed');
             res.status(500).json({ error: 'Proxy request failed', message: error.message });
