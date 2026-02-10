@@ -1,14 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Minimal CORS setup - allow all origins for now since it's used by both Tracker and Tester
 app.use(cors());
 
-// Health check endpoint
+// Serve static files from the root directory (where index.html is)
+app.use(express.static(path.join(__dirname, '..')));
+
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -18,9 +20,6 @@ app.get('/api/busestrams_get', async (req, res) => {
     try {
         const { resource_id, apikey, type, line, brigade } = req.query;
         
-        // Construct the target URL with query parameters
-        // Using the exact resource_id provided in the prompt if not passed, 
-        // but generally passing through what the frontend sends
         const targetUrl = 'https://api.um.warszawa.pl/api/action/busestrams_get/';
         
         const params = {
@@ -30,11 +29,11 @@ app.get('/api/busestrams_get', async (req, res) => {
             ...req.query
         };
 
-        console.log(`Proxying request to Warsaw API with params:`, { ...params, apikey: '***' });
+        console.log(`Proxying request to Warsaw API for busestrams_get`);
 
         const response = await axios.get(targetUrl, {
             params,
-            timeout: 5000 // 5s timeout to keep it light
+            timeout: 5000
         });
 
         res.json(response.data);
@@ -46,6 +45,11 @@ app.get('/api/busestrams_get', async (req, res) => {
             res.status(500).json({ error: 'Proxy request failed', message: error.message });
         }
     }
+});
+
+// Catch-all route to serve index.html
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, '../index.html'));
 });
 
 app.listen(PORT, () => {
