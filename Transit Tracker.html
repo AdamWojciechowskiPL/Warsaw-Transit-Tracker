@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transit Tracker - WKD + Autobus</title>
+    <style>
+        :root {
+            --color-bg-primary: #0f172a;
+            --color-bg-secondary: #1e293b;
+            --color-bg-elevated: #334155;
+            --color-text-primary: #f1f5f9;
+            --color-text-secondary: #cbd5e1;
+            --color-text-muted: #94a3b8;
+            --color-accent: #38bdf8;
+            --color-accent-hover: #0ea5e9;
+            --color-success: #22c55e;
+            --color-warning: #f59e0b;
+            --color-danger: #ef4444;
+            --color-border: rgba(148, 163, 184, 0.2);
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root {
+                --color-bg-primary: #ffffff;
+                --color-bg-secondary: #f8fafc;
+                --color-bg-elevated: #f1f5f9;
+                --color-text-primary: #0f172a;
+                --color-text-secondary: #475569;
+                --color-text-muted: #64748b;
+                --color-accent: #0284c7;
+                --color-accent-hover: #0369a1;
+                --color-border: rgba(100, 116, 139, 0.2);
+            }
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--color-bg-primary);
+            color: var(--color-text-primary);
+            line-height: 1.6;
+            padding: 0;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 480px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        header {
+            padding: 20px 0 16px;
+            border-bottom: 1px solid var(--color-border);
+            margin-bottom: 24px;
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--color-text-primary);
+            margin-bottom: 4px;
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: var(--color-text-muted);
+        }
+
+        .route-selector {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+
+        .route-btn {
+            flex: 1;
+            padding: 12px 16px;
+            background: var(--color-bg-secondary);
+            border: 2px solid var(--color-border);
+            border-radius: 12px;
+            color: var(--color-text-primary);
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .route-btn:hover {
+            background: var(--color-bg-elevated);
+        }
+
+        .route-btn.active {
+            background: var(--color-accent);
+            border-color: var(--color-accent);
+            color: #0f172a;
+        }
+
+        .section {
+            background: var(--color-bg-secondary);
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 16px;
+            border: 1px solid var(--color-border);
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--color-text-primary);
+        }
+
+        .refresh-btn {
+            background: var(--color-bg-elevated);
+            border: 1px solid var(--color-border);
+            border-radius: 8px;
+            padding: 6px 12px;
+            color: var(--color-text-secondary);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: var(--color-accent);
+            color: #0f172a;
+            border-color: var(--color-accent);
+        }
+
+        .stop-info {
+            background: var(--color-bg-elevated);
+            padding: 12px;
+            border-radius: 10px;
+            margin-bottom: 16px;
+        }
+
+        .stop-name {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--color-text-primary);
+            margin-bottom: 4px;
+        }
+
+        .stop-meta {
+            font-size: 13px;
+            color: var(--color-text-muted);
+        }
+
+        .departures-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .departure-card {
+            background: var(--color-bg-primary);
+            border: 1px solid var(--color-border);
+            border-radius: 12px;
+            padding: 14px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .departure-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: 1;
+        }
+
+        .line-badge {
+            background: var(--color-accent);
+            color: #0f172a;
+            font-weight: 700;
+            font-size: 16px;
+            padding: 8px 14px;
+            border-radius: 8px;
+            min-width: 50px;
+            text-align: center;
+        }
+
+        .line-badge.wkd {
+            background: #ef4444;
+            color: white;
+        }
+
+        .departure-info {
+            flex: 1;
+        }
+
+        .destination {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--color-text-primary);
+            margin-bottom: 2px;
+        }
+
+        .time-info {
+            font-size: 13px;
+            color: var(--color-text-muted);
+        }
+
+        .departure-time {
+            text-align: right;
+        }
+
+        .time-main {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--color-text-primary);
+            margin-bottom: 2px;
+        }
+
+        .time-relative {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 6px;
+            display: inline-block;
+        }
+
+        .time-relative.soon {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--color-danger);
+        }
+
+        .time-relative.coming {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--color-warning);
+        }
+
+        .time-relative.later {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--color-success);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--color-text-muted);
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--color-border);
+            border-top-color: var(--color-accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 12px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 12px;
+            padding: 16px;
+            color: var(--color-danger);
+            font-size: 14px;
+            text-align: center;
+        }
+
+        .last-update {
+            text-align: center;
+            font-size: 12px;
+            color: var(--color-text-muted);
+            margin-top: 24px;
+            padding-top: 16px;
+            border-top: 1px solid var(--color-border);
+        }
+
+        .connection-section {
+            margin-top: 24px;
+        }
+
+        .connection-flow {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 16px;
+            padding: 16px;
+            background: var(--color-bg-elevated);
+            border-radius: 12px;
+        }
+
+        .connection-stop {
+            flex: 1;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--color-text-primary);
+        }
+
+        .connection-arrow {
+            color: var(--color-accent);
+            font-size: 20px;
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 32px 20px;
+            color: var(--color-text-muted);
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚇 Transit Tracker</h1>
+            <p class="subtitle">Śledź swój dojazd do pracy</p>
+        </header>
+
+        <div class="route-selector">
+            <button class="route-btn active" id="toWorkBtn" onclick="switchRoute('toWork')">
+                → Do pracy
+            </button>
+            <button class="route-btn" id="toHomeBtn" onclick="switchRoute('toHome')">
+                ← Do domu
+            </button>
+        </div>
+
+        <div id="routeContent"></div>
+
+        <div class="last-update" id="lastUpdate"></div>
+    </div>
+
+    <script>
+        const API_KEY = '34574ba5-4ce4-432b-ae87-0c26cec9809b';
+        const WKD_API = 'https://api.rozklad-wkd.pl/v1/api/train-status';
+        const WARSAW_API = 'https://api.um.warszawa.pl/api/action';
+        
+        let currentRoute = 'toWork';
+        let updateInterval;
+
+        const routes = {
+            toWork: {
+                wkd: {
+                    from: 'Nowa Wieś Warszawska',
+                    to: 'Raków',
+                    fromId: 'nowa-wies-warszawska',
+                    toId: 'rakow'
+                },
+                bus: {
+                    stop: 'PKP Służewiec',
+                    lines: ['189', '401'],
+                    busstopId: '408901',
+                    busstopNr: '01'
+                }
+            },
+            toHome: {
+                bus: {
+                    stop: 'PKP Służewiec',
+                    lines: ['189', '401'],
+                    busstopId: '325402',
+                    busstopNr: '01'
+                },
+                wkd: {
+                    from: 'Raków',
+                    to: 'Nowa Wieś Warszawska',
+                    fromId: 'rakow',
+                    toId: 'nowa-wies-warszawska'
+                }
+            }
+        };
+
+        function switchRoute(route) {
+            currentRoute = route;
+            document.getElementById('toWorkBtn').classList.toggle('active', route === 'toWork');
+            document.getElementById('toHomeBtn').classList.toggle('active', route === 'toHome');
+            loadRouteData();
+        }
+
+        async function loadRouteData() {
+            const content = document.getElementById('routeContent');
+            content.innerHTML = '<div class="loading"><div class="spinner"></div><p>Ładowanie danych...</p></div>';
+
+            try {
+                const routeConfig = routes[currentRoute];
+                let html = '';
+
+                if (currentRoute === 'toWork') {
+                    html += await renderWKDSection(routeConfig.wkd);
+                    html += '<div style="height: 16px;"></div>';
+                    html += await renderBusSection(routeConfig.bus);
+                } else {
+                    html += await renderBusSection(routeConfig.bus);
+                    html += '<div style="height: 16px;"></div>';
+                    html += await renderWKDSection(routeConfig.wkd);
+                }
+
+                content.innerHTML = html;
+                updateLastUpdateTime();
+            } catch (error) {
+                content.innerHTML = `<div class="error">Błąd ładowania danych: ${error.message}</div>`;
+            }
+        }
+
+        async function renderWKDSection(config) {
+            try {
+                const response = await fetch(WKD_API);
+                const data = await response.json();
+                
+                if (!data || !data.stations || !Array.isArray(data.stations)) {
+                    throw new Error('Nieprawidłowy format danych z API WKD');
+                }
+                
+                const station = data.stations.find(s => 
+                    s && s.stationName && s.stationName.toLowerCase().includes(config.from.toLowerCase())
+                );
+                
+                if (!station || !station.upcomingTrainsByDirection) {
+                    throw new Error('Nie znaleziono danych dla przystanku');
+                }
+                
+                const direction = config.to.toLowerCase().includes('raków') ? 'WAW' : 'GRO';
+                const trains = station.upcomingTrainsByDirection[direction] || [];
+                
+                const now = new Date();
+                const departures = trains
+                    .filter(train => train && train.estimatedDateTime)
+                    .map(train => {
+                        const estimatedTime = new Date(train.estimatedDateTime);
+                        const scheduledTime = new Date(train.scheduledDateTime);
+                        
+                        return {
+                            line: 'WKD',
+                            trainNumber: train.trainNumber,
+                            destination: config.to,
+                            time: estimatedTime,
+                            scheduled: scheduledTime,
+                            delay: train.delayMinutes || 0,
+                            liveStatus: train.liveStatus
+                        };
+                    })
+                    .filter(d => d.time > now)
+                    .sort((a, b) => a.time - b.time)
+                    .slice(0, 5);
+
+                let html = `
+                    <div class="section">
+                        <div class="section-header">
+                            <div class="section-title">🚊 WKD</div>
+                            <button class="refresh-btn" onclick="loadRouteData()">Odśwież</button>
+                        </div>
+                        <div class="stop-info">
+                            <div class="stop-name">${config.from}</div>
+                            <div class="stop-meta">→ ${config.to}</div>
+                        </div>
+                `;
+
+                if (departures.length === 0) {
+                    html += '<div class="no-data">Brak dostępnych odjazdów</div>';
+                } else {
+                    html += '<div class="departures-list">';
+                    departures.forEach(dep => {
+                        const minutesUntil = Math.floor((dep.time - new Date()) / 60000);
+                        const timeClass = minutesUntil <= 3 ? 'soon' : minutesUntil <= 10 ? 'coming' : 'later';
+                        const delayText = dep.delay !== 0 ? ` (opóźnienie: ${dep.delay} min)` : '';
+                        const liveIndicator = dep.liveStatus ? ' 🟢' : '';
+                        
+                        html += `
+                            <div class="departure-card">
+                                <div class="departure-left">
+                                    <div class="line-badge wkd">WKD ${dep.trainNumber}</div>
+                                    <div class="departure-info">
+                                        <div class="destination">${dep.destination}${liveIndicator}</div>
+                                        <div class="time-info">${dep.scheduled.toLocaleTimeString('pl-PL', {hour: '2-digit', minute: '2-digit'})}${delayText}</div>
+                                    </div>
+                                </div>
+                                <div class="departure-time">
+                                    <div class="time-main">${dep.time.toLocaleTimeString('pl-PL', {hour: '2-digit', minute: '2-digit'})}</div>
+                                    <div class="time-relative ${timeClass}">${minutesUntil} min</div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                }
+
+                html += '</div>';
+                return html;
+            } catch (error) {
+                return `<div class="section"><div class="error">Błąd WKD: ${error.message}</div></div>`;
+            }
+        }
+
+        async function renderBusSection(config) {
+            try {
+                const now = new Date();
+                const departures = [];
+
+                console.log('Fetching bus data for:', config);
+
+                for (const line of config.lines) {
+                    try {
+                        const params = new URLSearchParams({
+                            id: 'e923fa0e-d96c-43f9-ae6e-60518c9f3238',
+                            busstopId: config.busstopId,
+                            busstopNr: config.busstopNr,
+                            line: line,
+                            apikey: API_KEY
+                        });
+                        
+                        const url = `${WARSAW_API}/dbtimetable_get/?${params.toString()}`;
+                        console.log(`Fetching line ${line}...`);
+                        
+                        const response = await fetch(url, {
+                            method: 'GET',
+                            headers: {
+                                'Accept': 'application/json'
+                            }
+                        });
+                        
+                        if (!response.ok) {
+                            console.error(`HTTP error for line ${line}: ${response.status}`);
+                            continue;
+                        }
+                        
+                        const data = await response.json();
+                        console.log(`API Response for line ${line}:`, data);
+                        
+                        if (data.result && Array.isArray(data.result) && data.result.length > 0) {
+                            data.result.forEach(dep => {
+                                if (!dep.values || !Array.isArray(dep.values) || dep.values.length < 2) {
+                                    return;
+                                }
+                                const timeValue = dep.values[0]?.value;
+                                if (!timeValue || typeof timeValue !== 'string' || !timeValue.includes(':')) {
+                                    return;
+                                }
+                                const [hours, minutes] = timeValue.split(':').map(v => parseInt(v.trim()));
+                                if (isNaN(hours) || isNaN(minutes)) {
+                                    return;
+                                }
+                                
+                                const depTime = new Date();
+                                depTime.setHours(hours, minutes, 0, 0);
+                                
+                                if (depTime < now) {
+                                    depTime.setDate(depTime.getDate() + 1);
+                                }
+                                
+                                if (depTime - now < 90 * 60000) {
+                                    departures.push({
+                                        line: line,
+                                        destination: dep.values[1].value || 'Nieznany kierunek',
+                                        time: depTime,
+                                        scheduled: depTime
+                                    });
+                                }
+                            });
+                        } else {
+                            console.warn(`Brak wyników dla linii ${line} lub nieprawidłowy format danych`);
+                        }
+                    } catch (e) {
+                        console.error(`Błąd dla linii ${line}:`, e);
+                    }
+                }
+
+                departures.sort((a, b) => a.time - b.time);
+                const nextDepartures = departures.slice(0, 6);
+
+                let html = `
+                    <div class="section">
+                        <div class="section-header">
+                            <div class="section-title">🚌 Autobus</div>
+                            <button class="refresh-btn" onclick="loadRouteData()">Odśwież</button>
+                        </div>
+                        <div class="stop-info">
+                            <div class="stop-name">${config.stop}</div>
+                            <div class="stop-meta">Linie: ${config.lines.join(', ')}</div>
+                        </div>
+                `;
+
+                if (nextDepartures.length === 0) {
+                    html += `<div class="no-data">
+                        Brak dostępnych odjazdów w najbliższym czasie<br>
+                        <small style="margin-top: 8px; display: block; color: var(--color-text-muted);">
+                            Przystanek: ${config.busstopId}/${config.busstopNr}<br>
+                            Linie: ${config.lines.join(', ')}
+                        </small>
+                    </div>`;
+                } else {
+                    html += '<div class="departures-list">';
+                    nextDepartures.forEach(dep => {
+                        const minutesUntil = Math.floor((dep.time - now) / 60000);
+                        const timeClass = minutesUntil <= 3 ? 'soon' : minutesUntil <= 10 ? 'coming' : 'later';
+                        
+                        html += `
+                            <div class="departure-card">
+                                <div class="departure-left">
+                                    <div class="line-badge">${dep.line}</div>
+                                    <div class="departure-info">
+                                        <div class="destination">${dep.destination}</div>
+                                        <div class="time-info">Planowany odjazd</div>
+                                    </div>
+                                </div>
+                                <div class="departure-time">
+                                    <div class="time-main">${dep.time.toLocaleTimeString('pl-PL', {hour: '2-digit', minute: '2-digit'})}</div>
+                                    <div class="time-relative ${timeClass}">${minutesUntil} min</div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += '</div>';
+                }
+
+                html += '</div>';
+                return html;
+            } catch (error) {
+                return `<div class="section"><div class="error">Błąd autobusu: ${error.message}</div></div>`;
+            }
+        }
+
+        function updateLastUpdateTime() {
+            const now = new Date();
+            document.getElementById('lastUpdate').textContent = 
+                `Ostatnia aktualizacja: ${now.toLocaleTimeString('pl-PL')}`;
+        }
+
+        loadRouteData();
+        updateInterval = setInterval(loadRouteData, 30000);
+    </script>
+</body>
+</html>
