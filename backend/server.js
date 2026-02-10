@@ -15,13 +15,9 @@ app.use((req, res, next) => {
     next();
 });
 
-// Configure HTTPS Agent to allow legacy ciphers
-// Warsaw API server might be using older SSL/TLS configuration
-// which Node.js 18+ (used on Railway) rejects by default.
-// This is a common issue with Polish government/city APIs.
+// Configure HTTPS Agent
 const httpsAgent = new https.Agent({
-    rejectUnauthorized: false, // Bypass certificate validation issues if needed (use with caution)
-    // secureOptions: require('constants').SSL_OP_LEGACY_SERVER_CONNECT // Option if we need to go deeper
+    rejectUnauthorized: false
 });
 
 // Create customized axios instance
@@ -34,6 +30,38 @@ const apiClient = axios.create({
 app.get('/api/health', (req, res) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Helper function for retrying requests
+async function fetchWithRetry(url, params, method = 'POST', retries = 1) {
+    try {
+        console.log(`[Proxy] Attempt 1 (${method}): ${url}`);
+        if (method === 'POST') {
+             return await apiClient.post(url, null, { params });
+        } else {
+             return await apiClient.get(url, { params });
+        }
+    } catch (error) {
+        if (retries > 0) {
+            console.warn(`[Proxy] Request failed, retrying... (${retries} left)`);
+            // Fallback: Try HTTP instead of HTTPS if SSL is the blocker
+            // Warsaw API is also accessible via http://api.um.warszawa.pl often
+            const httpUrl = url.replace('https://', 'http://');
+            console.log(`[Proxy] Fallback to HTTP: ${httpUrl}`);
+            
+            try {
+                if (method === 'POST') {
+                    return await axios.post(httpUrl, null, { params, timeout: 30000 });
+                } else {
+                    return await axios.get(httpUrl, { params, timeout: 30000 });
+                }
+            } catch (retryError) {
+                // If HTTP fallback fails, throw the original error or the new one
+                throw retryError;
+            }
+        }
+        throw error;
+    }
+}
 
 // Proxy endpoint specifically for busestrams_get (Vehicles locations)
 app.get('/api/busestrams_get', async (req, res) => {
@@ -50,18 +78,13 @@ app.get('/api/busestrams_get', async (req, res) => {
         };
 
         const logParams = { ...params };
-        if (logParams.apikey) {
-            logParams.apikey = logParams.apikey.substring(0, 5) + '...';
-        }
+        if (logParams.apikey) logParams.apikey = logParams.apikey.substring(0, 5) + '...';
 
-        console.log(`[Proxy] Requesting Warsaw API (Vehicles) via POST: ${targetUrl}`);
-        console.log(`[Proxy] Params being sent:`, JSON.stringify(logParams));
+        console.log(`[Proxy] Requesting Warsaw API (Vehicles)`);
+        console.log(`[Proxy] Params:`, JSON.stringify(logParams));
 
-        // Use customized apiClient with HTTPS agent
-        const response = await apiClient.post(targetUrl, null, {
-            params,
-            timeout: 30000 
-        });
+        // Try POST first, with retry logic falling back to HTTP
+        const response = await fetchWithRetry(targetUrl, params, 'POST', 1);
 
         console.log(`[Proxy] Success! Status: ${response.status}`);
         const dataPreview = Array.isArray(response.data.result) 
@@ -91,17 +114,12 @@ app.get('/api/dbtimetable_get', async (req, res) => {
         };
 
         const logParams = { ...params };
-        if (logParams.apikey) {
-             logParams.apikey = logParams.apikey.substring(0, 5) + '...';
-        }
+        if (logParams.apikey) logParams.apikey = logParams.apikey.substring(0, 5) + '...';
 
-        console.log(`[Proxy] Requesting Warsaw API (Timetables) via GET: ${targetUrl}`);
-        console.log(`[Proxy] Params:`, JSON.stringify(logParams));
-
-        const response = await apiClient.get(targetUrl, {
-            params,
-            timeout: 30000
-        });
+        console.log(`[Proxy] Requesting Warsaw API (Timetables)`);
+        
+        // Use GET for timetables with retry
+        const response = await fetchWithRetry(targetUrl, params, 'GET', 1);
 
         console.log(`[Proxy] Success! Status: ${response.status}`);
         res.json(response.data);
@@ -112,8 +130,6 @@ app.get('/api/dbtimetable_get', async (req, res) => {
 
 function handleProxyError(error, res) {
     console.error('[Proxy] Error details:');
-    
-    // Log extended error info for debugging SSL issues
     if (error.code) console.error(`- Code: ${error.code}`);
     if (error.message) console.error(`- Message: ${error.message}`);
     
@@ -121,12 +137,11 @@ function handleProxyError(error, res) {
          console.error('- Timeout exceeded. The Warsaw API is too slow or blocking Railway IP.');
          res.status(504).json({ 
              error: 'Gateway Timeout', 
-             message: 'The Warsaw API took too long to respond (over 30s). This usually indicates the Railway IP is blocked by ZTM or SSL handshake failed.',
+             message: 'The Warsaw API took too long to respond (over 30s). Tried HTTPS and HTTP.',
              details: error.message
          });
     } else if (error.response) {
         console.error(`- API Status: ${error.response.status}`);
-        // console.error(`- API Data:`, JSON.stringify(error.response.data)); // Optional: uncomment if needed
         res.status(error.response.status).json(error.response.data);
     } else if (error.request) {
         console.error('- No response received from upstream');
