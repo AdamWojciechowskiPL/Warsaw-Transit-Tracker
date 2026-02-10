@@ -11,7 +11,8 @@ app.use(cors());
 // Serve static files from the root directory (where index.html is)
 app.use(express.static(path.join(__dirname, '..')));
 
-app.get('/health', (req, res) => {
+// API Health check
+app.get('/api/health', (req, res) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -47,7 +48,12 @@ app.get('/api/busestrams_get', async (req, res) => {
     }
 });
 
-// Catch-all route to serve index.html
+// Handle 404 for undefined API routes (must be before catch-all)
+app.use('/api/*', (req, res) => {
+    res.status(404).json({ error: 'API endpoint not found' });
+});
+
+// Catch-all route to serve index.html (SPA support)
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../index.html'));
 });
