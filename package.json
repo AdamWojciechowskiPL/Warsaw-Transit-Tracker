@@ -1,0 +1,10 @@
+{
+  "name": "warsaw-transit-tracker-root",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "cd backend && npm install && node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
