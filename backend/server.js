@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 // Configure Axios Client
 function createApiClient() {
     const config = {
-        timeout: 30000,
+        timeout: 60000, // Increased timeout to 60s
         headers: {
             // Spoof headers to look like a browser to avoid some IP blocks
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -77,13 +77,13 @@ async function fetchWithRetry(url, params, method = 'POST', retries = 1) {
                     // Use a fresh axios call for fallback to avoid reusing failed agent if that was the cause
                     return await axios.post(httpUrl, null, { 
                         params, 
-                        timeout: 30000,
+                        timeout: 60000, // Increased timeout to 60s
                         headers: apiClient.defaults.headers // keep headers
                     });
                 } else {
                     return await axios.get(httpUrl, { 
                         params, 
-                        timeout: 30000,
+                        timeout: 60000, // Increased timeout to 60s
                         headers: apiClient.defaults.headers
                     });
                 }
@@ -162,7 +162,7 @@ function handleProxyError(error, res) {
          console.error('- Timeout exceeded. The Warsaw API is too slow or blocking Railway IP.');
          res.status(504).json({ 
              error: 'Gateway Timeout', 
-             message: 'The Warsaw API took too long to respond (over 30s). This usually means the API is blocking our server IP.',
+             message: 'The Warsaw API took too long to respond (over 60s). This usually means the API is blocking our server IP.',
              details: error.message,
              tip: 'Try configuring a PROXY_URL environment variable in Railway.'
          });
