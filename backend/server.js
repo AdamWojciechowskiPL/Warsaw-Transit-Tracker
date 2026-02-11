@@ -3,6 +3,7 @@ const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
 const https = require('https');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,16 +16,37 @@ app.use((req, res, next) => {
     next();
 });
 
-// Configure HTTPS Agent
-const httpsAgent = new https.Agent({
-    rejectUnauthorized: false
-});
+// Configure Axios Client
+function createApiClient() {
+    const config = {
+        timeout: 30000,
+        headers: {
+            // Spoof headers to look like a browser to avoid some IP blocks
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': 'https://www.google.com/',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive'
+        }
+    };
 
-// Create customized axios instance
-const apiClient = axios.create({
-    httpsAgent: httpsAgent,
-    timeout: 30000
-});
+    // Proxy Configuration via Environment Variable
+    // Example format: http://user:pass@1.2.3.4:8080 or http://1.2.3.4:8080
+    if (process.env.PROXY_URL) {
+        console.log(`[Config] Using Proxy: ${process.env.PROXY_URL.replace(/:[^:]*@/, ':****@')}`);
+        const proxyAgent = new HttpsProxyAgent(process.env.PROXY_URL);
+        config.httpsAgent = proxyAgent;
+        config.httpAgent = proxyAgent; // Use same agent for http fallback if needed
+    } else {
+        // Standard HTTPS Agent with SSL verification disabled (legacy fix)
+        config.httpsAgent = new https.Agent({ rejectUnauthorized: false });
+    }
+
+    return axios.create(config);
+}
+
+const apiClient = createApiClient();
 
 // API Health check
 app.get('/api/health', (req, res) => {
@@ -41,21 +63,31 @@ async function fetchWithRetry(url, params, method = 'POST', retries = 1) {
              return await apiClient.get(url, { params });
         }
     } catch (error) {
-        if (retries > 0) {
+        // Retry logic ONLY if we are NOT using a specific proxy (if proxy fails, it likely needs changing, not retrying on same)
+        // Or if error is a timeout/network issue
+        if (retries > 0 && !process.env.PROXY_URL) {
             console.warn(`[Proxy] Request failed, retrying... (${retries} left)`);
-            // Fallback: Try HTTP instead of HTTPS if SSL is the blocker
-            // Warsaw API is also accessible via http://api.um.warszawa.pl often
+            
+            // Fallback: Try HTTP instead of HTTPS
             const httpUrl = url.replace('https://', 'http://');
             console.log(`[Proxy] Fallback to HTTP: ${httpUrl}`);
             
             try {
                 if (method === 'POST') {
-                    return await axios.post(httpUrl, null, { params, timeout: 30000 });
+                    // Use a fresh axios call for fallback to avoid reusing failed agent if that was the cause
+                    return await axios.post(httpUrl, null, { 
+                        params, 
+                        timeout: 30000,
+                        headers: apiClient.defaults.headers // keep headers
+                    });
                 } else {
-                    return await axios.get(httpUrl, { params, timeout: 30000 });
+                    return await axios.get(httpUrl, { 
+                        params, 
+                        timeout: 30000,
+                        headers: apiClient.defaults.headers
+                    });
                 }
             } catch (retryError) {
-                // If HTTP fallback fails, throw the original error or the new one
                 throw retryError;
             }
         }
@@ -83,15 +115,9 @@ app.get('/api/busestrams_get', async (req, res) => {
         console.log(`[Proxy] Requesting Warsaw API (Vehicles)`);
         console.log(`[Proxy] Params:`, JSON.stringify(logParams));
 
-        // Try POST first, with retry logic falling back to HTTP
         const response = await fetchWithRetry(targetUrl, params, 'POST', 1);
 
         console.log(`[Proxy] Success! Status: ${response.status}`);
-        const dataPreview = Array.isArray(response.data.result) 
-            ? `Array(${response.data.result.length})` 
-            : typeof response.data.result;
-        console.log(`[Proxy] Data result type: ${dataPreview}`);
-
         res.json(response.data);
     } catch (error) {
         handleProxyError(error, res);
@@ -118,7 +144,6 @@ app.get('/api/dbtimetable_get', async (req, res) => {
 
         console.log(`[Proxy] Requesting Warsaw API (Timetables)`);
         
-        // Use GET for timetables with retry
         const response = await fetchWithRetry(targetUrl, params, 'GET', 1);
 
         console.log(`[Proxy] Success! Status: ${response.status}`);
@@ -137,8 +162,9 @@ function handleProxyError(error, res) {
          console.error('- Timeout exceeded. The Warsaw API is too slow or blocking Railway IP.');
          res.status(504).json({ 
              error: 'Gateway Timeout', 
-             message: 'The Warsaw API took too long to respond (over 30s). Tried HTTPS and HTTP.',
-             details: error.message
+             message: 'The Warsaw API took too long to respond (over 30s). This usually means the API is blocking our server IP.',
+             details: error.message,
+             tip: 'Try configuring a PROXY_URL environment variable in Railway.'
          });
     } else if (error.response) {
         console.error(`- API Status: ${error.response.status}`);
@@ -155,17 +181,22 @@ function handleProxyError(error, res) {
 app.get('/api/test-connection', async (req, res) => {
     const results = {
         timestamp: new Date().toISOString(),
+        config: {
+            proxyConfigured: !!process.env.PROXY_URL,
+            userAgent: apiClient.defaults.headers['User-Agent'] ? 'Custom' : 'Default'
+        },
         tests: []
     };
 
     const testUrl = async (name, url, method = 'GET') => {
         const start = Date.now();
         try {
-            const response = await axios({
+            // Use the main apiClient to test if the headers/proxy configuration works
+            const response = await apiClient({
                 method,
                 url,
-                timeout: 5000, // Short timeout for testing
-                validateStatus: () => true // Resolve even if status is error
+                timeout: 5000, 
+                validateStatus: () => true 
             });
             return {
                 name,
@@ -186,19 +217,14 @@ app.get('/api/test-connection', async (req, res) => {
         }
     };
 
-    // Test 1: General Internet Connectivity
     results.tests.push(await testUrl('Google (Connectivity Check)', 'https://www.google.com'));
-
-    // Test 2: Warsaw API (HTTPS)
     results.tests.push(await testUrl('Warsaw API (HTTPS)', 'https://api.um.warszawa.pl/api/action/busestrams_get/'));
-
-    // Test 3: Warsaw API (HTTP)
     results.tests.push(await testUrl('Warsaw API (HTTP)', 'http://api.um.warszawa.pl/api/action/busestrams_get/'));
 
-    // Test 4: Warsaw API (IP Check - external service)
     try {
-        const ipCheck = await axios.get('https://ifconfig.me', { timeout: 5000 });
-        results.serverIp = ipCheck.data;
+        // Check IP using the same agent (so if proxy is on, we see proxy IP)
+        const ipCheck = await apiClient.get('https://api.ipify.org?format=json', { timeout: 5000 });
+        results.serverIp = ipCheck.data.ip;
     } catch (e) {
         results.serverIp = 'Unknown (failed to resolve)';
     }
@@ -206,20 +232,22 @@ app.get('/api/test-connection', async (req, res) => {
     res.json(results);
 });
 
-// Handle 404 for undefined API routes (must be before catch-all)
+// Handle 404
 app.use('/api/*', (req, res) => {
-    console.warn(`[404] API Endpoint not found: ${req.originalUrl}`);
     res.status(404).json({ error: 'API endpoint not found' });
 });
 
-// Serve static files from the root directory (where index.html is)
+// Serve static files
 app.use(express.static(path.join(__dirname, '..')));
 
-// Catch-all route to serve index.html (SPA support) - MUST BE LAST
+// Catch-all route
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../index.html'));
 });
 
 app.listen(PORT, () => {
     console.log(`Warsaw Transit Proxy running on port ${PORT}`);
+    if (process.env.PROXY_URL) {
+        console.log('Extensions: Proxy Agent enabled');
+    }
 });
