@@ -151,6 +151,61 @@ function handleProxyError(error, res) {
     }
 }
 
+// Diagnostic endpoint to test connectivity
+app.get('/api/test-connection', async (req, res) => {
+    const results = {
+        timestamp: new Date().toISOString(),
+        tests: []
+    };
+
+    const testUrl = async (name, url, method = 'GET') => {
+        const start = Date.now();
+        try {
+            const response = await axios({
+                method,
+                url,
+                timeout: 5000, // Short timeout for testing
+                validateStatus: () => true // Resolve even if status is error
+            });
+            return {
+                name,
+                url,
+                status: response.status,
+                duration: `${Date.now() - start}ms`,
+                success: response.status >= 200 && response.status < 400
+            };
+        } catch (error) {
+            return {
+                name,
+                url,
+                error: error.message,
+                code: error.code,
+                duration: `${Date.now() - start}ms`,
+                success: false
+            };
+        }
+    };
+
+    // Test 1: General Internet Connectivity
+    results.tests.push(await testUrl('Google (Connectivity Check)', 'https://www.google.com'));
+
+    // Test 2: Warsaw API (HTTPS)
+    results.tests.push(await testUrl('Warsaw API (HTTPS)', 'https://api.um.warszawa.pl/api/action/busestrams_get/'));
+
+    // Test 3: Warsaw API (HTTP)
+    results.tests.push(await testUrl('Warsaw API (HTTP)', 'http://api.um.warszawa.pl/api/action/busestrams_get/'));
+
+    // Test 4: Warsaw API (IP Check - external service)
+    try {
+        const ipCheck = await axios.get('https://ifconfig.me', { timeout: 5000 });
+        results.serverIp = ipCheck.data;
+    } catch (e) {
+        results.serverIp = 'Unknown (failed to resolve)';
+    }
+
+    res.json(results);
+});
+
 // Handle 404 for undefined API routes (must be before catch-all)
 app.use('/api/*', (req, res) => {
     console.warn(`[404] API Endpoint not found: ${req.originalUrl}`);
