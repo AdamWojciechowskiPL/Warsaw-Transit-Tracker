@@ -115,7 +115,7 @@ app.get('/api/busestrams_get', async (req, res) => {
         console.log(`[Proxy] Requesting Warsaw API (Vehicles)`);
         console.log(`[Proxy] Params:`, JSON.stringify(logParams));
 
-        const response = await fetchWithRetry(targetUrl, params, 'POST', 1);
+        const response = await fetchWithRetry(targetUrl, params, 'GET', 1);
 
         console.log(`[Proxy] Success! Status: ${response.status}`);
         res.json(response.data);
@@ -229,25 +229,4 @@ app.get('/api/test-connection', async (req, res) => {
         results.serverIp = 'Unknown (failed to resolve)';
     }
 
-    res.json(results);
-});
-
-// Handle 404
-app.use('/api/*', (req, res) => {
-    res.status(404).json({ error: 'API endpoint not found' });
-});
-
-// Serve static files
-app.use(express.static(path.join(__dirname, '..')));
-
-// Catch-all route
-app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../index.html'));
-});
-
-app.listen(PORT, () => {
-    console.log(`Warsaw Transit Proxy running on port ${PORT}`);
-    if (process.env.PROXY_URL) {
-        console.log('Extensions: Proxy Agent enabled');
-    }
-});
+    res.json(results);\n});\n\n// Handle 404\napp.use('/api/*', (req, res) => {\n    res.status(404).json({ error: 'API endpoint not found' });\n});\n\n// Serve static files\napp.use(express.static(path.join(__dirname, '..')));\n\n// Catch-all route\napp.get('*', (req, res) => {\n    res.sendFile(path.join(__dirname, '../index.html'));\n});\n\napp.listen(PORT, () => {\n    console.log(`Warsaw Transit Proxy running on port ${PORT}`);\n    if (process.env.PROXY_URL) {\n        console.log('Extensions: Proxy Agent enabled');\n    }\n});
