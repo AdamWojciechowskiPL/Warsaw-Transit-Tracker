@@ -1,5 +1,5 @@
 import { Handler, HandlerEvent, HandlerContext } from "@netlify/functions";
-import { getUserFromContext } from "./lib/auth";
+import { verifyToken } from "./lib/auth";
 import { Database } from "./lib/db";
 import { RecommendationEngine } from "./lib/recommendation";
 
@@ -28,14 +28,12 @@ export const handler: Handler = async (event: HandlerEvent, context: HandlerCont
       return json(200, { status: "ok", timestamp: new Date().toISOString() });
     }
 
-    // Auth - używamy natywnego kontekstu Netlify
-    const identityUser = getUserFromContext(context);
-    
-    // Jeśli brak usera w kontekście, a endpoint jest chroniony -> 401
-    // (Można tu dodać white-listę publicznych endpointów)
+    // Auth - weryfikacja JWT z nagłówka Authorization (Auth0 Bearer token)
+    const identityUser = await verifyToken(event.headers['authorization']);
+
     if (!identityUser) {
-      console.log('[AUTH] No user in clientContext');
-       return json(401, { error: "Unauthorized" });
+      console.log('[AUTH] No valid bearer token in Authorization header');
+      return json(401, { error: "Unauthorized" });
     }
 
     // Upsert user
