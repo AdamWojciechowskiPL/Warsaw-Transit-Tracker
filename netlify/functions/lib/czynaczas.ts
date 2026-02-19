@@ -11,7 +11,7 @@ interface RawDeparture {
   line: string;
   direction: string;
   stop_id: string; // "wkd_wrako" or numeric
-  day: string; // YYYY-MM-DD
+  day?: string; // YYYY-MM-DD (make optional to handle missing data)
   departure_time: number; // seconds from midnight (schedule)
   departure_time_live?: number; // seconds from midnight (live) or null
   vehicle_id?: string;
@@ -82,13 +82,17 @@ export class CzynaczasClient {
         delaySec = live - scheduled;
       }
 
+      // Fallback for missing day: use current date (UTC) to prevent crash
+      // ZTM API sometimes returns entries without 'day'
+      const dayStr = raw.day || new Date().toISOString().split('T')[0];
+
       return {
         mode,
         agency,
         route_id: raw.line,
         headsign: raw.direction,
         stop_id: raw.stop_id,
-        date: raw.day.replace(/-/g, ''), // YYYY-MM-DD -> YYYYMMDD
+        date: dayStr.replace(/-/g, ''), // YYYY-MM-DD -> YYYYMMDD
         scheduled_sec: scheduled,
         live_sec: live,
         delay_sec: delaySec,
