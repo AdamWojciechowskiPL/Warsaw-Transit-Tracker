@@ -23,12 +23,14 @@ export class RecommendationEngine {
     };
   }> {
     const { profile, config, segments } = profileData;
+    console.log(`[RecEngine] Starting recommendation for profile: ${profile.id} (${profile.name})`);
 
     // Znajdź segmenty TRAIN i BUS
     const trainSegment = segments.find(s => s.mode === 'TRAIN');
     const busSegment = segments.find(s => s.mode === 'BUS');
 
     if (!trainSegment || !busSegment) {
+      console.error(`[RecEngine] Missing segments! Train: ${!!trainSegment}, Bus: ${!!busSegment}`);
       throw new Error('Profile must have both TRAIN and BUS segments');
     }
 
@@ -37,6 +39,7 @@ export class RecommendationEngine {
 
     // Zbierz wszystkie stop_id dla autobusów (z wariantami)
     const busStopIds = this.collectBusStopIds(busSegment);
+    console.log(`[RecEngine] Bus stops to fetch: ${busStopIds.join(', ')}`);
 
     let wkdStatus: "available" | "unavailable" = "available";
     let ztmStatus: "available" | "unavailable" = "available";
@@ -44,10 +47,12 @@ export class RecommendationEngine {
     // Pobierz dane WKD
     let trainDepartures: Departure[] = [];
     try {
+      console.log(`[RecEngine] Fetching WKD for stop ${trainStopId}`);
       trainDepartures = await this.client.getDepartures(trainStopId, 10);
+      console.log(`[RecEngine] Fetched ${trainDepartures.length} WKD departures`);
       if (trainDepartures.length === 0) wkdStatus = "unavailable";
     } catch (e) {
-      console.error('[REC] WKD fetch error:', e);
+      console.error('[RecEngine] WKD fetch error:', e);
       wkdStatus = "unavailable";
     }
 
@@ -55,20 +60,26 @@ export class RecommendationEngine {
     const busDataByStop: Record<string, Departure[]> = {};
     for (const stopId of busStopIds) {
       try {
-        busDataByStop[stopId] = await this.client.getDepartures(stopId, 20);
+        console.log(`[RecEngine] Fetching ZTM for stop ${stopId}`);
+        const deps = await this.client.getDepartures(stopId, 20);
+        busDataByStop[stopId] = deps;
+        console.log(`[RecEngine] Fetched ${deps.length} ZTM departures for ${stopId}`);
       } catch (e) {
-        console.error(`[REC] ZTM fetch error for ${stopId}:`, e);
+        console.error(`[RecEngine] ZTM fetch error for ${stopId}:`, e);
         busDataByStop[stopId] = [];
         ztmStatus = "unavailable";
       }
     }
 
     if (Object.values(busDataByStop).every(d => d.length === 0)) {
+      console.warn(`[RecEngine] All ZTM stops returned 0 departures`);
       ztmStatus = "unavailable";
     }
 
     // Generuj opcje transferu
+    console.log(`[RecEngine] Computing options...`);
     const options = this.computeOptions(trainDepartures, busSegment, busDataByStop, config, limit);
+    console.log(`[RecEngine] Generated ${options.length} options`);
 
     return {
       options,
@@ -106,12 +117,14 @@ export class RecommendationEngine {
   ): TransferOption[] {
     const options: TransferOption[] = [];
     const allowedBusLines = busSegment.allowed_route_ids || [];
+    console.log(`[RecEngine] Allowed bus lines: ${allowedBusLines.join(', ')}`);
 
     // Dla każdego odjazdu pociągu (max 8 najbliższych)
     const trainCandidates = trainDepartures.slice(0, 8);
 
     for (const train of trainCandidates) {
       const trainTime = train.live_sec ?? train.scheduled_sec;
+      // console.log(`[RecEngine] Processing train: ${train.route_id} at ${trainTime} (${new Date().toLocaleTimeString()})`);
 
       // Dla każdej linii autobusowej
       for (const busLine of allowedBusLines) {
@@ -134,7 +147,10 @@ export class RecommendationEngine {
             return busTime >= readySec;
           });
 
-          if (!busDep) continue;
+          if (!busDep) {
+             // console.log(`[RecEngine] No bus found for line ${busLine} after ${readySec} (stop: ${stopId})`);
+             continue;
+          }
 
           const busTime = busDep.live_sec ?? busDep.scheduled_sec;
           const bufferSec = busTime - readySec;
@@ -150,9 +166,7 @@ export class RecommendationEngine {
             risk = "HIGH";
           } else if (bufferSec <= 300) {
             risk = "MED";
-          } else {
-            risk = "LOW";
-          }
+          } else {\n            risk = "LOW";\n          }
           // Kara za brak live
           if (!train.live_sec && risk === "LOW") risk = "MED";
 
