@@ -39,12 +39,8 @@ export async function verifyToken(
     console.log('[AUTH] No Authorization header present');
     return null;
   }
-  if (!authHeader.startsWith('Bearer ')) {
-    console.log('[AUTH] Authorization header does not start with Bearer');
-    return null;
-  }
-
-  const token = authHeader.split(' ')[1];
+  
+  const token = authHeader.replace(/^Bearer\s+/, '');
   if (!token) {
     console.log('[AUTH] Empty token after Bearer');
     return null;
@@ -53,7 +49,7 @@ export async function verifyToken(
   // Szybka walidacja formatu JWT (3 segmenty)
   const parts = token.split('.');
   if (parts.length !== 3) {
-    console.error('[AUTH] Token is not a JWT (opaque token?). Parts:', parts.length);
+    console.error(`[AUTH] Token is not a JWT (opaque token?). Parts: ${parts.length}`);
     console.error('[AUTH] Make sure AUTH0_AUDIENCE is set both in Netlify env AND in Auth0Provider (authorizationParams.audience)');
     return null;
   }
@@ -61,17 +57,17 @@ export async function verifyToken(
   const audience = process.env.AUTH0_AUDIENCE;
   const issuer = getIssuer();
 
-  console.log('[AUTH] Verifying JWT | issuer:', issuer, '| audience:', audience || '(none)');
+  // console.log('[AUTH] Verifying JWT | issuer:', issuer, '| audience:', audience || '(none)');
 
   try {
     const JWKS = getJWKS();
     const { payload } = await jwtVerify(token, JWKS, {
       issuer,
-      ...(audience ? { audience } : {}),
+      audience: audience || undefined, // Tylko jeśli ustawione, inaczej nie waliduj audience (uwaga: mniej bezpieczne, ale ułatwia dev)
       algorithms: ['RS256'],
     });
 
-    console.log('[AUTH] JWT valid | sub:', payload.sub);
+    // console.log('[AUTH] JWT valid | sub:', payload.sub);
     return {
       sub: payload.sub!,
       email: payload['email'] as string | undefined,
@@ -79,8 +75,8 @@ export async function verifyToken(
     };
   } catch (err: any) {
     console.error('[AUTH] JWT verify failed:', err.message);
-    console.error('[AUTH] issuer used:', issuer);
-    console.error('[AUTH] audience used:', audience || '(none)');
+    // console.error('[AUTH] issuer used:', issuer);
+    // console.error('[AUTH] audience used:', audience || '(none)');
     // Decode header+payload for debugging (without verification)
     try {
       const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
