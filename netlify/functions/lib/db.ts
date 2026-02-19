@@ -6,10 +6,10 @@ export class Database {
 
   constructor() {
     // Pobieramy connection string ze zmiennych środowiskowych
-    if (!process.env.DATABASE_URL) {
-      throw new Error("Missing DATABASE_URL environment variable");
+    if (!process.env.NETLIFY_DATABASE_URL) {
+      throw new Error("Missing NETLIFY_DATABASE_URL environment variable");
     }
-    this.client = new Client(process.env.DATABASE_URL);
+    this.client = new Client(process.env.NETLIFY_DATABASE_URL);
   }
 
   async connect() {
