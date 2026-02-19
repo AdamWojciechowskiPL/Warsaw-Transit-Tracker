@@ -27,8 +27,11 @@ function App() {
     setTokenGetter(async () => {
       if (!isAuthenticated) return null;
       try {
-        // VITE_AUTH0_AUDIENCE – automatycznie dostępne przez import.meta.env
-        const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined;
+        // Fallback: check VITE_ prefixed vars first, then AUTH0_ prefixed vars
+        const audience =
+          (import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined) ||
+          (import.meta.env.AUTH0_AUDIENCE as string | undefined);
+
         return await getAccessTokenSilently(
           audience ? { authorizationParams: { audience } } : {}
         );
