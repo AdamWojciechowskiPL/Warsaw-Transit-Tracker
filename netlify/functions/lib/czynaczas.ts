@@ -13,7 +13,7 @@ type RawDeparture = Record<string, any>;
 
 export class CzynaczasClient {
   async getDepartures(stopId: string, limit: number = 10): Promise<Departure[]> {
-    const url = `https://czynaczas.pl/api/warsaw/timetable/${stopId}?limit=30`; // Pobieramy więcej
+    const url = `https://czynaczas.pl/api/warsaw/timetable/${stopId}?limit=40`; // Pobieramy więcej by rec engine miał z czego filtrować
 
     const now = Date.now();
     console.log(`[CzynaczasClient] Requesting departures for stopId=${stopId}`);
@@ -84,7 +84,7 @@ export class CzynaczasClient {
     const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
 
     // Nowszy schemat: date = "YYYYMMDD"
-    if (typeof raw.date === 'string' && /^\d{8}$/.test(raw.date)) {
+    if (typeof raw.date === 'string' && /^\\d{8}$/.test(raw.date)) {
       return raw.date;
     }
 
@@ -150,6 +150,8 @@ export class CzynaczasClient {
       return timeA - timeB;
     });
 
-    return departures.slice(0, limit);
+    // ZWRACAMY WSZYSTKO BEZ OBCINANIA DO limit - obcięcie limit nastąpi po filtracji kierunków w silniku rekomendacji (w RecommendationEngine)
+    // "limit" zostanie przeniesiony jako filtr zwracany na samym koncu logiki RecommendationEngine.
+    return departures;
   }
 }
