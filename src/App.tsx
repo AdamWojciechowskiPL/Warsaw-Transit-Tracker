@@ -5,6 +5,8 @@ import { AppUser, RouteProfile } from './types';
 import { Dashboard } from './components/Dashboard';
 import { ProfileSettings } from './components/ProfileSettings';
 
+declare const __AUTH0_AUDIENCE__: string;
+
 type View = 'dashboard' | 'settings';
 
 function App() {
@@ -27,7 +29,10 @@ function App() {
     setTokenGetter(async () => {
       if (!isAuthenticated) return null;
       try {
-        const audience = import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined;
+        // Używamy __AUTH0_AUDIENCE__ (wstrzykiwane przez vite.config define),
+        // NIE import.meta.env.VITE_AUTH0_AUDIENCE – ta zmienna nie istnieje.
+        // Bez audience Auth0 zwraca opaque token zamiast JWT.
+        const audience = __AUTH0_AUDIENCE__ || undefined;
         return await getAccessTokenSilently(
           audience ? { authorizationParams: { audience } } : {}
         );
