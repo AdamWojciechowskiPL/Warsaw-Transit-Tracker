@@ -57,7 +57,7 @@ export class RecommendationEngine {
     let trainBoardDepartures: Departure[] = [];
     try {
       console.log(`[RecEngine] Fetching WKD (board) for stop ${trainBoardStopId}`);
-      trainBoardDepartures = await this.client.getDepartures(trainBoardStopId, 10);
+      trainBoardDepartures = await this.client.getDepartures(trainBoardStopId, 20); // Pobieramy więcej by mieć z czego filtrować
       console.log(`[RecEngine] Fetched ${trainBoardDepartures.length} WKD departures (board)`);
       if (trainBoardDepartures.length === 0) wkdStatus = "unavailable";
     } catch (e) {
@@ -126,7 +126,18 @@ export class RecommendationEngine {
       if (d.trip_id) byTripId.set(d.trip_id, d);
     }
 
-    return boardDepartures.map((board) => {
+    // Filtrujemy odjazdy z przystanku początkowego tylko do tych,
+    // które faktycznie pojawiają się na przystanku przesiadkowym (odpowiedni kierunek).
+    let filteredBoardDepartures = boardDepartures;
+    if (transferStopId && byTripId.size > 0) {
+      filteredBoardDepartures = boardDepartures.filter(board => {
+        if (!board.trip_id) return true; // Zostawiamy te bez ID, by nie tracić danych gdy brakuje trip_id
+        return byTripId.has(board.trip_id); // Pociąg musi pojawić się na stacji docelowej
+      });
+      console.log(`[RecEngine] Filtered WKD departures by direction: ${boardDepartures.length} -> ${filteredBoardDepartures.length}`);
+    }
+
+    return filteredBoardDepartures.map((board) => {
       const warnings: string[] = [];
 
       let transfer: Departure | null = null;
@@ -178,7 +189,7 @@ export class RecommendationEngine {
     const allowedBusLines = busSegment.allowed_route_ids || [];
     console.log(`[RecEngine] Allowed bus lines: ${allowedBusLines.join(', ')}`);
 
-    // Dla każdego odjazdu pociągu (max 8 najbliższych)
+    // Dla każdego odjazdu pociągu (max 8 najbliższych po filtracji)
     const trainTop = trainCandidates.slice(0, 8);
 
     for (const cand of trainTop) {
