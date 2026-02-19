@@ -6,15 +6,22 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
-# Przekierowanie API do funkcji
+# Przekierowanie API
 [[redirects]]
   from = "/api/v1/*"
   to = "/.netlify/functions/api"
   status = 200
   force = true
 
-# Obsługa SPA (Frontend routing)
+# Obsługa SPA
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+
+# --- NOWA SEKCJA PONIŻEJ ---
+[dev]
+  command = "npm run vite:dev"  # Uruchom Vite zamiast builda
+  targetPort = 5173             # Port, na którym wstanie Vite
+  port = 8888                   # Port główny Netlify (tutaj wchodzisz w przeglądarce)
+  autoLaunch = false
