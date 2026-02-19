@@ -15,6 +15,7 @@ function App() {
     logout,
     user: auth0User,
     getAccessTokenSilently,
+    getIdTokenClaims, // Dodano: potrzebne do fallbacku na ID Token
   } = useAuth0();
 
   const [appUser, setAppUser] = useState<AppUser | null>(null);
@@ -32,15 +33,24 @@ function App() {
           (import.meta.env.VITE_AUTH0_AUDIENCE as string | undefined) ||
           (import.meta.env.AUTH0_AUDIENCE as string | undefined);
 
-        return await getAccessTokenSilently(
-          audience ? { authorizationParams: { audience } } : {}
-        );
+        if (audience) {
+          // Jeśli mamy audience (skonfigurowane API), pobieramy Access Token (JWT)
+          return await getAccessTokenSilently({ 
+            authorizationParams: { audience } 
+          });
+        }
+
+        // Jeśli NIE mamy audience, pobieramy ID Token (zawsze JWT)
+        // Zapobiega to błędowi "Opaque Token" (Parts: 5) na backendzie
+        const idToken = await getIdTokenClaims();
+        return idToken?.__raw || null;
+
       } catch (e) {
         console.error('[Token]', e);
         return null;
       }
     });
-  }, [isAuthenticated, getAccessTokenSilently]);
+  }, [isAuthenticated, getAccessTokenSilently, getIdTokenClaims]);
 
   const loadUserData = async () => {
     try {
