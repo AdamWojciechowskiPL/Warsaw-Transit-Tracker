@@ -48,6 +48,9 @@ export type StopVariantConfig = Record<string, Array<{
 // --- DOMAIN DTOs (zgodne ze specyfikacją 6.2) ---
 
 export interface Departure {
+  // Uwaga: Czynaczas zwraca różne schematy dla WKD/ZTM; trip_id może być null.
+  trip_id?: string | null;
+
   mode: "TRAIN" | "BUS";
   agency: "WKD" | "ZTM";
   route_id: string;
@@ -69,6 +72,10 @@ export interface Departure {
 export interface TransferOption {
   id: string;
   train: Departure;
+  // Opcjonalnie: dla segmentu TRAIN możemy policzyć przesiadkę na podstawie czasu na to_stop_id.
+  train_transfer?: Departure | null;
+  train_transfer_time_sec?: number;
+
   bus: Departure;
   bus_stop_variant: string | null; // "A", "B"
   walk_sec: number;

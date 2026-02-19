@@ -32,6 +32,9 @@ export interface TransferConfig {
 }
 
 export interface Departure {
+  // Backend może dosłać trip_id dla WKD (używane do dopasowania czasu na stacji przesiadkowej).
+  trip_id?: string | null;
+
   mode: 'TRAIN' | 'BUS';
   agency: 'WKD' | 'ZTM';
   route_id: string;
@@ -51,6 +54,10 @@ export interface Departure {
 export interface TransferOption {
   id: string;
   train: Departure;
+  // Opcjonalnie: backend może dosłać rekord WKD na stacji przesiadkowej.
+  train_transfer?: Departure | null;
+  train_transfer_time_sec?: number;
+
   bus: Departure;
   bus_stop_variant: string | null;
   walk_sec: number;
