@@ -1,149 +1,169 @@
-import { Handler, HandlerEvent, HandlerContext } from "@netlify/functions";
+import { Handler, HandlerEvent } from "@netlify/functions";
 import jwt from "jsonwebtoken";
 import { Database } from "./lib/db";
-import { CzynaczasClient } from "./lib/czynaczas";
-import { AppUser } from "./lib/types";
+import { RecommendationEngine } from "./lib/recommendation";
 
-// --- KONFIGURACJA ---
-const API_PREFIX = "/api/v1";
-
-// --- AUTH HELPER ---
-// Weryfikuje JWT i wyciąga dane użytkownika (sub, email, name)
 const getUserFromEvent = (event: HandlerEvent): { sub: string; email?: string; name?: string } | null => {
   const authHeader = event.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return null;
-  }
-
-  const token = authHeader.split(" ")[1];
+  if (!authHeader?.startsWith("Bearer ")) return null;
   try {
-    // Uwaga: W produkcji weryfikujemy podpis kluczem publicznym Netlify Identity.
-    // Na potrzeby MVP i dev ufamy strukturze tokena (Netlify Gateway to robi przed nami),
-    // ale dekodujemy go, by pobrać 'sub'.
-    const decoded = jwt.decode(token); 
-    if (!decoded || typeof decoded !== 'object' || !decoded.sub) {
-      return null;
-    }
-    
+    const decoded = jwt.decode(authHeader.split(" ")[1]);
+    if (!decoded || typeof decoded !== 'object' || !decoded.sub) return null;
     return {
       sub: decoded.sub,
       email: decoded.email,
       name: decoded.user_metadata?.full_name || decoded.name
     };
-  } catch (err) {
-    console.error("Auth error:", err);
+  } catch {
     return null;
   }
 };
 
-// --- HANDLERS ---
+const json = (statusCode: number, body: object) => ({
+  statusCode,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body)
+});
 
-async function handleGetMe(db: Database, identityUser: { sub: string, email?: string, name?: string }) {
-  // 1. Spróbuj pobrać usera z bazy
-  let user = await db.getUserBySubject(identityUser.sub);
-
-  // 2. Jeśli nie istnieje, utwórz go (Auto-registration on first login)
-  if (!user) {
-    console.log(`Creating new user for subject: ${identityUser.sub}`);
-    user = await db.createUser(identityUser.sub, identityUser.email, identityUser.name);
-  }
-
-  // 3. Pobierz aktywny profil (jeśli jest)
-  const activeProfileData = await db.getActiveProfile(user.id);
-
-  return {
-    statusCode: 200,
-    body: JSON.stringify({
-      user,
-      active_profile: activeProfileData ? activeProfileData.profile : null,
-      // Debug info
-      meta: {
-        db_connected: true
-      }
-    }),
-  };
-}
-
-// Endpoint testowy do sprawdzania proxy (WKD/ZTM)
-// GET /api/v1/debug/timetable?stop_id=wkd_wrako
-async function handleGetTimetableDebug(event: HandlerEvent) {
-  const stopId = event.queryStringParameters?.stop_id;
-  
-  if (!stopId) {
-    return { statusCode: 400, body: JSON.stringify({ error: "Missing stop_id" }) };
-  }
-
-  const client = new CzynaczasClient();
-  // Pobieramy 5 najbliższych odjazdów
-  const departures = await client.getDepartures(stopId, 5);
-
-  return {
-    statusCode: 200,
-    body: JSON.stringify({
-      stop_id: stopId,
-      count: departures.length,
-      departures: departures
-    }),
-  };
-}
-
-// --- MAIN ROUTER ---
-
-export const handler: Handler = async (event, context) => {
-  // Setup DB
+export const handler: Handler = async (event) => {
   const db = new Database();
 
   try {
-    // 0. Path Routing (prosty router)
-    // Oczekujemy: /.netlify/functions/api (z rewrite) -> event.path
-    // Netlify dev local path: /api/v1/...
-    const path = event.path.replace("/.netlify/functions/api", "").replace("/api/v1", "");
-    
-    console.log(`[REQUEST] ${event.httpMethod} ${path}`);
+    const rawPath = event.path
+      .replace("/.netlify/functions/api", "")
+      .replace("/api/v1", "");
+    const path = rawPath || "/";
+    const method = event.httpMethod;
 
-    // 1. Connect DB
+    console.log(`[REQUEST] ${method} ${path}`);
+
     await db.connect();
 
-    // 2. Authentication Check (wymagane dla większości endpointów)
+    // Health check
+    if (path === "/health") {
+      return json(200, { status: "ok", timestamp: new Date().toISOString() });
+    }
+
+    // Auth
     const identityUser = getUserFromEvent(event);
-    
-    // Public routes (jeśli będą) - tutaj brak
-    // Protected routes:
+    if (!identityUser) return json(401, { error: "Unauthorized" });
 
-    if (!identityUser) {
-      // Dla endpointu health check / status publicznego (opcjonalnie)
-      if (path === "/health") {
-        return { statusCode: 200, body: JSON.stringify({ status: "ok" }) };
+    // Upsert user
+    let user = await db.getUserBySubject(identityUser.sub);
+    if (!user) user = await db.createUser(identityUser.sub, identityUser.email, identityUser.name);
+
+    // --- GET /me ---
+    if (method === "GET" && path === "/me") {
+      const activeProfile = await db.getActiveProfile(user.id);
+      return json(200, {
+        user,
+        active_profile: activeProfile?.profile ?? null
+      });
+    }
+
+    // --- GET /route-profiles ---
+    if (method === "GET" && path === "/route-profiles") {
+      const profiles = await db.getProfiles(user.id);
+      return json(200, { profiles });
+    }
+
+    // --- POST /route-profiles ---
+    if (method === "POST" && path === "/route-profiles") {
+      const body = JSON.parse(event.body || "{}");
+      if (!body.name) return json(400, { error: "name is required" });
+      const profile = await db.createProfile(user.id, body.name);
+      return json(201, { profile });
+    }
+
+    // --- PUT /route-profiles/:id ---
+    const profileMatch = path.match(/^\/route-profiles\/([\w-]+)$/);
+    if (profileMatch) {
+      const profileId = profileMatch[1];
+      const profile = await db.getProfileById(profileId, user.id);
+      if (!profile) return json(404, { error: "Profile not found" });
+
+      if (method === "PUT") {
+        const body = JSON.parse(event.body || "{}");
+        const updated = await db.updateProfile(profileId, user.id, body);
+        return json(200, { profile: updated });
       }
-      return {
-        statusCode: 401,
-        body: JSON.stringify({ error: "Unauthorized" }),
-      };
+
+      if (method === "DELETE") {
+        await db.deleteProfile(profileId, user.id);
+        return json(200, { success: true });
+      }
     }
 
-    // 3. Route Dispatch
-    if (event.httpMethod === "GET" && path === "/me") {
-      return await handleGetMe(db, identityUser);
+    // --- GET/PUT /route-profiles/:id/segments ---
+    const segmentsMatch = path.match(/^\/route-profiles\/([\w-]+)\/segments$/);
+    if (segmentsMatch) {
+      const profileId = segmentsMatch[1];
+      const profile = await db.getProfileById(profileId, user.id);
+      if (!profile) return json(404, { error: "Profile not found" });
+
+      if (method === "GET") {
+        const segments = await db.getSegments(profileId);
+        return json(200, { segments });
+      }
+
+      if (method === "PUT") {
+        const body = JSON.parse(event.body || "{}");
+        if (!Array.isArray(body.segments)) return json(400, { error: "segments array required" });
+        const segments = await db.replaceSegments(profileId, body.segments);
+        return json(200, { segments });
+      }
     }
 
-    if (event.httpMethod === "GET" && path === "/debug/timetable") {
-      return await handleGetTimetableDebug(event);
+    // --- GET/PUT /route-profiles/:id/transfer-config ---
+    const configMatch = path.match(/^\/route-profiles\/([\w-]+)\/transfer-config$/);
+    if (configMatch) {
+      const profileId = configMatch[1];
+      const profile = await db.getProfileById(profileId, user.id);
+      if (!profile) return json(404, { error: "Profile not found" });
+
+      if (method === "GET") {
+        const config = await db.getTransferConfig(profileId);
+        return json(200, { config });
+      }
+
+      if (method === "PUT") {
+        const body = JSON.parse(event.body || "{}");
+        const config = await db.upsertTransferConfig(profileId, body);
+        return json(200, { config });
+      }
     }
 
-    // Fallback
-    return {
-      statusCode: 404,
-      body: JSON.stringify({ error: `Route not found: ${path}` }),
-    };
+    // --- GET /route/recommendation ---
+    if (method === "GET" && path === "/route/recommendation") {
+      const profileId = event.queryStringParameters?.profile_id;
+      const limit = parseInt(event.queryStringParameters?.limit || "5");
+
+      if (!profileId) return json(400, { error: "profile_id required" });
+
+      const profileData = await db.getActiveProfileById(profileId, user.id);
+      if (!profileData) return json(404, { error: "Profile not found or not accessible" });
+
+      const engine = new RecommendationEngine();
+      const result = await engine.getRecommendations(profileData, limit);
+      return json(200, result);
+    }
+
+    // --- GET /debug/timetable (dev only) ---
+    if (method === "GET" && path === "/debug/timetable") {
+      const stopId = event.queryStringParameters?.stop_id;
+      if (!stopId) return json(400, { error: "Missing stop_id" });
+      const { CzynaczasClient } = await import("./lib/czynaczas");
+      const client = new CzynaczasClient();
+      const departures = await client.getDepartures(stopId, 10);
+      return json(200, { stop_id: stopId, count: departures.length, departures });
+    }
+
+    return json(404, { error: `Route not found: ${path}` });
 
   } catch (error: any) {
     console.error("[SERVER ERROR]", error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: error.message || "Internal Server Error" }),
-    };
+    return json(500, { error: error.message || "Internal Server Error" });
   } finally {
-    // 4. Cleanup
     await db.disconnect();
   }
 };
