@@ -85,8 +85,7 @@ export class RecommendationEngine {
       options,
       meta: {
         profile_id: profile.id,
-        timestamp: new Date().toISOString(),
-        live_status: { wkd: wkdStatus, ztm: ztmStatus }
+        timestamp: new Date().toISOString(),\n        live_status: { wkd: wkdStatus, ztm: ztmStatus }
       }
     };
   }
@@ -166,16 +165,18 @@ export class RecommendationEngine {
             risk = "HIGH";
           } else if (bufferSec <= 300) {
             risk = "MED";
-          } else {\n            risk = "LOW";\n          }
+          } else {
+            risk = "LOW";
+          }
           // Kara za brak live
-          if (!train.live_sec && risk === "LOW") risk = "MED";
+          if (!train.live_sec && risk === \"LOW\") risk = \"MED\";
 
           // Score: wyższy = lepszy (preferuj duży bufor, karz brak live i wysokie ryzyko)
           let score = bufferSec;
           if (!train.live_sec) score -= 120;
           if (!busDep.live_sec) score -= 60;
-          if (risk === "HIGH") score -= 300;
-          if (risk === "MED") score -= 100;
+          if (risk === \"HIGH\") score -= 300;
+          if (risk === \"MED\") score -= 100;
 
           const optId = `${train.scheduled_sec}_${busLine}_${variant ?? 'X'}`;
 
