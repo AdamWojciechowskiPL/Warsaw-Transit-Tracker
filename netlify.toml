@@ -3,10 +3,10 @@
   publish = "dist"
 
 [build.environment]
-  # AUTH0_DOMAIN i AUTH0_CLIENT_ID to wartości PUBLICZNE (nie sekrety) –
-  # wymagane przez każdą przeglądarkę w standardowym Auth0 SPA flow.
-  # Pomijamy je w skanowaniu sekretów, żeby Netlify nie blokował buildu.
-  SECRETS_SCAN_OMIT_KEYS = "AUTH0_CLIENT_ID,AUTH0_DOMAIN"
+  # Zmienne VITE_* są automatycznie dostępne dla Vite podczas buildu.
+  # Ustaw je w Netlify UI: Site configuration → Environment variables.
+  # AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_AUDIENCE – tylko dla funkcji backendowych.
+  SECRETS_SCAN_OMIT_KEYS = "VITE_AUTH0_CLIENT_ID,VITE_AUTH0_DOMAIN,AUTH0_CLIENT_ID,AUTH0_DOMAIN"
 
 [functions]
   directory = "netlify/functions"
@@ -25,9 +25,8 @@
   to = "/index.html"
   status = 200
 
-# --- NOWA SEKCJA PONIŻEJ ---
 [dev]
-  command = "npm run vite:dev"  # Uruchom Vite zamiast builda
-  targetPort = 5173             # Port, na którym wstanie Vite
-  port = 8888                   # Port główny Netlify (tutaj wchodzisz w przeglądarce)
+  command = "npm run vite:dev"
+  targetPort = 5173
+  port = 8888
   autoLaunch = false

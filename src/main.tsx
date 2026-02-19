@@ -3,15 +3,13 @@ import ReactDOM from 'react-dom/client';
 import { Auth0Provider } from '@auth0/auth0-react';
 import App from './App';
 
-// Wartości wstrzykiwane przez vite.config.ts z AUTH0_* env vars (Netlify Extension).
-// Używamy aliasów __AUTH0_*__ żeby uniknąć fałszywych alarmów Netlify Secret Scanner.
-declare const __AUTH0_DOMAIN__: string;
-declare const __AUTH0_CLIENT_ID__: string;
-declare const __AUTH0_AUDIENCE__: string;
+const domain   = import.meta.env.VITE_AUTH0_DOMAIN   as string;
+const clientId = import.meta.env.VITE_AUTH0_CLIENT_ID as string;
+const audience = import.meta.env.VITE_AUTH0_AUDIENCE  as string | undefined;
 
-const domain   = __AUTH0_DOMAIN__;
-const clientId = __AUTH0_CLIENT_ID__;
-const audience = __AUTH0_AUDIENCE__ || undefined;
+if (!domain || !clientId) {
+  console.error('[Auth0] VITE_AUTH0_DOMAIN lub VITE_AUTH0_CLIENT_ID nie są ustawione!');
+}
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
