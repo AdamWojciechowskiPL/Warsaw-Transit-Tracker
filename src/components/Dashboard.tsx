@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api } from '../api';
-import { RecommendationResult, TransferOption, RouteProfile } from '../types';
+import { RecommendationResult, TransferOption, RouteProfile, Departure } from '../types';
 import { secToHHMM, formatDelay, formatBuffer, riskColor, riskLabel } from '../utils/time';
-import { RefreshCw, AlertTriangle, CheckCircle, XCircle, Settings } from 'lucide-react';
+import { RefreshCw, AlertTriangle, Settings, ArrowRight, Activity, MapPin } from 'lucide-react';
 
 const AUTO_REFRESH_INTERVAL = 25_000;
 
@@ -17,6 +17,9 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  
+  // Tryb live
+  const [isLiveMode, setIsLiveMode] = useState(false);
 
   const fetchRecommendations = useCallback(async () => {
     if (!activeProfile) return;
@@ -42,6 +45,17 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     return () => clearInterval(interval);
   }, [fetchRecommendations]);
 
+  // Jeśli jesteśmy w trybie live, ale wybrana opcja zniknęła (np. minęła),
+  // znajdź pierwszą dostępną (najlepiej tę samą linię, lub po prostu pierwszą).
+  useEffect(() => {
+    if (isLiveMode && result) {
+      const optExists = result.options.find(o => o.id === selectedOptionId);
+      if (!optExists && result.options.length > 0) {
+        setSelectedOptionId(result.options[0].id);
+      }
+    }
+  }, [result, isLiveMode, selectedOptionId]);
+
   if (!activeProfile) {
     return (
       <div style={styles.emptyState}>
@@ -58,7 +72,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       {/* Header */}
       <div style={styles.header}>
         <div>
-          <h2 style={styles.profileName}>{activeProfile.name}</h2>
+          <h2 style={styles.profileName}>{isLiveMode ? '🔴 Tryb Live' : activeProfile.name}</h2>
           {lastRefresh && (
             <span style={styles.lastRefresh}>
               Odświeżono: {lastRefresh.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -66,7 +80,6 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
           )}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {/* Live status */}
           {result && (
             <div style={styles.liveStatus}>
               <span>{result.meta.live_status.wkd === 'available' ? '✅' : '❌'} WKD</span>
@@ -81,55 +94,83 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
           >
             <RefreshCw size={18} />
           </button>
-          <button style={styles.btnIcon} onClick={onGoToSettings} title="Ustawienia">
-            <Settings size={18} />
-          </button>
+          {!isLiveMode && (
+            <button style={styles.btnIcon} onClick={onGoToSettings} title="Ustawienia">
+              <Settings size={18} />
+            </button>
+          )}
+          {isLiveMode && (
+             <button style={styles.btnDanger} onClick={() => setIsLiveMode(false)} title="Zakończ trasę">
+               Zakończ
+             </button>
+          )}
         </div>
       </div>
 
-      {/* Error */}
       {error && (
         <div style={styles.errorBanner}>
           <AlertTriangle size={16} /> {error}
         </div>
       )}
 
-      {/* No results */}
       {!loading && result && result.options.length === 0 && (
         <div style={styles.emptyState}>
           <p>Brak dostępnych połączeń w tej chwili.</p>
         </div>
       )}
 
-      {/* TOP recommendation */}
-      {selectedOption && (
-        <BestOptionCard option={selectedOption} />
-      )}
-
-      {/* Alternatives list */}
-      {result && result.options.length > 1 && (
-        <div style={styles.alternativesSection}>
-          <h3 style={styles.sectionTitle}>Alternatywy</h3>
-          <div style={styles.alternativesList}>
-            {result.options.map((opt, idx) => (
-              <AlternativeCard
-                key={opt.id}
-                option={opt}
-                index={idx}
-                isSelected={opt.id === selectedOptionId}
-                onClick={() => setSelectedOptionId(opt.id)}
-              />
-            ))}
-          </div>
-        </div>
+      {isLiveMode && selectedOption ? (
+        <LiveGuidanceView 
+          option={selectedOption} 
+          allOptions={result?.options ?? []}
+          onSwitchAlternative={(id) => setSelectedOptionId(id)}
+        />
+      ) : (
+        <>
+          {selectedOption && (
+            <BestOptionCard 
+              option={selectedOption} 
+              onStartLive={() => setIsLiveMode(true)}
+            />
+          )}
+          {result && result.options.length > 1 && (
+            <div style={styles.alternativesSection}>
+              <h3 style={styles.sectionTitle}>Alternatywy</h3>
+              <div style={styles.alternativesList}>
+                {result.options.map((opt, idx) => (
+                  <AlternativeCard
+                    key={opt.id}
+                    option={opt}
+                    isSelected={opt.id === selectedOptionId}
+                    onClick={() => setSelectedOptionId(opt.id)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function BestOptionCard({ option }: { option: TransferOption }) {
+function getTransferStationArrivalTime(option: TransferOption): number {
+  if (option.train_transfer) {
+    return option.train_transfer.live_sec ?? option.train_transfer.scheduled_sec;
+  }
+  if (option.train_transfer_time_sec) {
+    return option.train_transfer_time_sec;
+  }
+  return option.ready_sec - option.walk_sec - option.exit_buffer_sec;
+}
+
+function BestOptionCard({ option, onStartLive }: { option: TransferOption; onStartLive: () => void }) {
   const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
   const trainDelay = formatDelay(option.train.delay_sec);
+  
+  const arrivalSec = getTransferStationArrivalTime(option);
+  const arrivalTime = secToHHMM(arrivalSec);
+
   const busTime = secToHHMM(option.bus.live_sec ?? option.bus.scheduled_sec);
   const busDelay = formatDelay(option.bus.delay_sec);
   const riskC = riskColor(option.risk);
@@ -154,12 +195,15 @@ function BestOptionCard({ option }: { option: TransferOption }) {
         <div style={styles.headsign}>{option.train.headsign}</div>
       </div>
 
-      {/* Walk indicator */}
-      <div style={styles.walkRow}>
-        <span>🚶 {Math.floor(option.walk_sec / 60)} min dojścia</span>
+      <div style={styles.arrivalRow}>
+        <MapPin size={14} /> Dojazd do przesiadki: <strong>{arrivalTime}</strong>
       </div>
 
-      {/* Variant indicator - KRYTYCZNY ELEMENT */}
+      {/* Walk indicator */}
+      <div style={styles.walkRow}>
+        <span>🚶 {Math.floor(option.walk_sec / 60)} min dojścia (planowo)</span>
+      </div>
+
       {option.bus_stop_variant && (
         <div style={styles.variantBanner}>
           🚏 IDŹ NA PRZYSTANEK: <strong>WARIANT {option.bus_stop_variant}</strong>
@@ -193,6 +237,11 @@ function BestOptionCard({ option }: { option: TransferOption }) {
         <span style={styles.bufferTime}>Bufor: {formatBuffer(option.buffer_sec)}</span>
       </div>
 
+      {/* Start Live button */}
+      <button style={styles.btnStartLive} onClick={onStartLive}>
+        <Activity size={18} /> Podłącz trasę (Live)
+      </button>
+
       {/* Warnings */}
       {option.warnings.length > 0 && (
         <div style={styles.warningsSection}>
@@ -205,12 +254,92 @@ function BestOptionCard({ option }: { option: TransferOption }) {
   );
 }
 
-function AlternativeCard({ option, index, isSelected, onClick }: {
-  option: TransferOption;
-  index: number;
-  isSelected: boolean;
-  onClick: () => void;
-}) {
+function LiveGuidanceView({ option, allOptions, onSwitchAlternative }: { option: TransferOption; allOptions: TransferOption[]; onSwitchAlternative: (id: string) => void }) {
+  const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
+  const arrivalSec = getTransferStationArrivalTime(option);
+  const arrivalTime = secToHHMM(arrivalSec);
+  const busTime = secToHHMM(option.bus.live_sec ?? option.bus.scheduled_sec);
+  const riskC = riskColor(option.risk);
+
+  const isRisky = option.risk === 'HIGH' || option.buffer_sec < 0;
+  
+  // Znajdź alternatywy, które odjeżdżają w podobnym czasie lub później, z pominięciem obecnej
+  const alternatives = allOptions.filter(o => o.id !== option.id && o.risk !== 'HIGH');
+
+  return (
+    <div style={styles.liveContainer}>
+      {isRisky && (
+        <div style={styles.liveAlert}>
+          <AlertTriangle size={24} />
+          <div>
+            <strong>Zagrożona przesiadka!</strong>
+            <div>Pojazd ucieknie lub masz ujemny bufor. Zobacz alternatywy poniżej.</div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ ...styles.liveTimeline, borderLeftColor: riskC }}>
+        <div style={styles.liveStep}>
+          <div style={styles.liveStepDot}>🚂</div>
+          <div style={styles.liveStepContent}>
+            <div style={styles.liveStepTitle}>WKD do {option.train.headsign}</div>
+            <div style={styles.liveStepTime}>
+              Odjazd: <strong>{trainTime}</strong> {formatDelay(option.train.delay_sec)}
+            </div>
+            <div style={styles.liveStepTime}>
+              Dojazd na przesiadkę: <strong>{arrivalTime}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div style={styles.liveStep}>
+          <div style={styles.liveStepDot}>🚶</div>
+          <div style={styles.liveStepContent}>
+            <div style={styles.liveStepTitle}>Przejście pieszo</div>
+            <div style={styles.liveStepTime}>
+              Planowany czas dojścia: {Math.floor(option.walk_sec / 60)} min
+            </div>
+            {option.bus_stop_variant && (
+              <div style={styles.liveVariantBadge}>
+                Kieruj się na wariant: {option.bus_stop_variant}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div style={styles.liveStep}>
+          <div style={styles.liveStepDot}>🚌</div>
+          <div style={styles.liveStepContent}>
+            <div style={styles.liveStepTitle}>ZTM Linia {option.bus.route_id} do {option.bus.headsign}</div>
+            <div style={styles.liveStepTime}>
+              Odjazd: <strong>{busTime}</strong> {formatDelay(option.bus.delay_sec)}
+            </div>
+            <div style={{ ...styles.liveBuffer, color: riskC }}>
+              Pozostało na przesiadkę: {formatBuffer(option.buffer_sec)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {(isRisky || alternatives.length > 0) && (
+        <div style={styles.liveAlternatives}>
+          <h4 style={{ margin: '0 0 12px 0' }}>Dostępne alternatywne przesiadki:</h4>
+          {alternatives.length === 0 ? (
+            <p style={{ fontSize: 14, color: '#6b7280' }}>Brak innych bezpiecznych opcji.</p>
+          ) : (
+            <div style={styles.alternativesList}>
+              {alternatives.slice(0, 3).map(opt => (
+                <AlternativeCard key={opt.id} option={opt} isSelected={false} onClick={() => onSwitchAlternative(opt.id)} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AlternativeCard({ option, isSelected, onClick }: { option: TransferOption; isSelected: boolean; onClick: () => void; }) {
   const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
   const busTime = secToHHMM(option.bus.live_sec ?? option.bus.scheduled_sec);
   const riskC = riskColor(option.risk);
@@ -230,7 +359,7 @@ function AlternativeCard({ option, index, isSelected, onClick }: {
           <span style={{ color: '#6b7280' }}>→</span>
           <span style={{ fontWeight: 600 }}>🚌 {option.bus.route_id} {busTime}</span>
           {option.bus_stop_variant && (
-            <span style={{ ...styles.variantBadge }}>Wariant {option.bus_stop_variant}</span>
+            <span style={styles.variantBadge}>Wariant {option.bus_stop_variant}</span>
           )}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -244,7 +373,6 @@ function AlternativeCard({ option, index, isSelected, onClick }: {
   );
 }
 
-// ---- STYLES ----
 const styles: Record<string, React.CSSProperties> = {
   container: { padding: '0 0 32px' },
   header: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 },
@@ -252,8 +380,12 @@ const styles: Record<string, React.CSSProperties> = {
   lastRefresh: { fontSize: 12, color: '#9ca3af' },
   liveStatus: { display: 'flex', gap: 8, fontSize: 13, color: '#374151' },
   btnIcon: {
-    background: 'none', border: '1px solid #e5e7eb', borderRadius: 8,
+    background: 'white', border: '1px solid #e5e7eb', borderRadius: 8,
     padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#374151'
+  },
+  btnDanger: {
+    background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 8,
+    padding: '6px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#dc2626', fontWeight: 600
   },
   spinning: { animation: 'spin 1s linear infinite' },
   btnPrimary: {
@@ -273,11 +405,9 @@ const styles: Record<string, React.CSSProperties> = {
     border: '2px solid', borderRadius: 12, padding: 20,
     background: 'white', marginBottom: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
   },
-  transportRow: {
-    display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12
-  },
+  transportRow: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 },
   transportIcon: { fontSize: 28 },
-  transportInfo: { display: 'flex', alignItems: 'center', gap: 8, flex: 1 },
+  transportInfo: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, flex: 1 },
   lineLabel: {
     background: '#1d4ed8', color: 'white', borderRadius: 6,
     padding: '2px 8px', fontWeight: 700, fontSize: 14
@@ -285,10 +415,14 @@ const styles: Record<string, React.CSSProperties> = {
   timeMain: { fontSize: 26, fontWeight: 800, color: '#111827' },
   delayBadge: { fontWeight: 700, fontSize: 15 },
   noLive: { color: '#d97706', fontSize: 13, fontWeight: 500 },
-  headsign: { color: '#6b7280', fontSize: 14, textAlign: 'right' },
+  headsign: { color: '#6b7280', fontSize: 14, width: '100%', marginTop: 2 },
+  arrivalRow: {
+    color: '#374151', fontSize: 14, paddingLeft: 40, marginBottom: 4,
+    display: 'flex', alignItems: 'center', gap: 6
+  },
   walkRow: {
     color: '#6b7280', fontSize: 13, paddingLeft: 40, marginBottom: 10,
-    borderLeft: '2px dashed #d1d5db', marginLeft: 19
+    borderLeft: '2px dashed #d1d5db', marginLeft: 19, paddingBottom: 6
   },
   variantBanner: {
     background: '#1d4ed8', color: 'white', borderRadius: 8,
@@ -301,6 +435,12 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 8, padding: '12px 16px', marginTop: 8
   },
   bufferTime: { fontSize: 16, fontWeight: 600, color: '#374151' },
+  btnStartLive: {
+    marginTop: 16, width: '100%', background: '#10b981', color: 'white',
+    border: 'none', borderRadius: 8, padding: '14px 20px', cursor: 'pointer',
+    fontWeight: 700, fontSize: 16, display: 'flex', justifyContent: 'center',
+    alignItems: 'center', gap: 8, transition: 'background 0.2s'
+  },
   warningsSection: { marginTop: 10, paddingTop: 10, borderTop: '1px solid #f3f4f6' },
   warningItem: {
     display: 'flex', alignItems: 'center', gap: 6,
@@ -316,5 +456,31 @@ const styles: Record<string, React.CSSProperties> = {
   variantBadge: {
     background: '#dbeafe', color: '#1d4ed8', borderRadius: 6,
     padding: '2px 8px', fontSize: 12, fontWeight: 700
-  }
+  },
+  liveContainer: {
+    background: 'white', borderRadius: 12, padding: 20, boxShadow: '0 4px 12px rgba(0,0,0,0.1)'
+  },
+  liveAlert: {
+    background: '#fef2f2', color: '#dc2626', border: '2px solid #fca5a5',
+    borderRadius: 8, padding: '12px 16px', marginBottom: 20,
+    display: 'flex', alignItems: 'center', gap: 12, fontSize: 15
+  },
+  liveTimeline: {
+    borderLeft: '4px solid', marginLeft: 16, paddingLeft: 24, display: 'flex', flexDirection: 'column', gap: 24
+  },
+  liveStep: { position: 'relative' },
+  liveStepDot: {
+    position: 'absolute', left: -44, top: 0, width: 36, height: 36,
+    background: 'white', border: '2px solid #e5e7eb', borderRadius: '50%',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, zIndex: 2
+  },
+  liveStepContent: { background: '#f9fafb', padding: '12px 16px', borderRadius: 8, border: '1px solid #e5e7eb' },
+  liveStepTitle: { fontWeight: 700, fontSize: 16, color: '#111827', marginBottom: 4 },
+  liveStepTime: { fontSize: 14, color: '#4b5563', marginBottom: 2 },
+  liveVariantBadge: {
+    display: 'inline-block', marginTop: 8, background: '#1d4ed8', color: 'white',
+    borderRadius: 6, padding: '4px 8px', fontWeight: 600, fontSize: 13
+  },
+  liveBuffer: { marginTop: 8, fontWeight: 700, fontSize: 15 },
+  liveAlternatives: { marginTop: 24, paddingTop: 16, borderTop: '1px solid #e5e7eb' }
 };
