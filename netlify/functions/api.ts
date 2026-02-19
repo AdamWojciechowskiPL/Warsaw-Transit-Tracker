@@ -18,8 +18,9 @@ export const handler: Handler = async (event: HandlerEvent, context: HandlerCont
       .replace("/api/v1", "");
     const path = rawPath || "/";
     const method = event.httpMethod;
+    const queryParams = JSON.stringify(event.queryStringParameters);
 
-    console.log(`[REQUEST] ${method} ${path}`);
+    console.log(`[REQUEST] ${method} ${path} ? ${queryParams}`);
 
     await db.connect();
 
@@ -123,17 +124,30 @@ export const handler: Handler = async (event: HandlerEvent, context: HandlerCont
 
     // --- GET /route/recommendation ---
     if (method === "GET" && path === "/route/recommendation") {
+      console.log(`[API] Fetching recommendations...`);
       const profileId = event.queryStringParameters?.profile_id;
       const limit = parseInt(event.queryStringParameters?.limit || "5");
 
-      if (!profileId) return json(400, { error: "profile_id required" });
+      if (!profileId) {
+        console.warn(`[API] Missing profile_id`);
+        return json(400, { error: "profile_id required" });
+      }
 
       const profileData = await db.getActiveProfileById(profileId, user.id);
-      if (!profileData) return json(404, { error: "Profile not found or not accessible" });
+      if (!profileData) {
+        console.warn(`[API] Profile not found: ${profileId}`);
+        return json(404, { error: "Profile not found or not accessible" });
+      }
 
       const engine = new RecommendationEngine();
-      const result = await engine.getRecommendations(profileData, limit);
-      return json(200, result);
+      try {
+        const result = await engine.getRecommendations(profileData, limit);
+        console.log(`[API] Sending ${result.options.length} recommendations`);
+        return json(200, result);
+      } catch (err: any) {
+        console.error(`[API] Recommendation Engine Error:`, err);
+        return json(500, { error: err.message || "Recommendation error" });
+      }
     }
 
     // --- GET /debug/timetable (dev only) ---
@@ -146,6 +160,7 @@ export const handler: Handler = async (event: HandlerEvent, context: HandlerCont
       return json(200, { stop_id: stopId, count: departures.length, departures });
     }
 
+    console.warn(`[API] 404 Not Found: ${path}`);
     return json(404, { error: `Route not found: ${path}` });
 
   } catch (error: any) {
