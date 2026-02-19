@@ -3,3 +3,5 @@ backend/node_modules/
 .env
 *.log
 .DS_Store
+# Local Netlify folder
+.netlify
