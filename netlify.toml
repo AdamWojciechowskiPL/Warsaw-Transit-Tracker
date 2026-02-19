@@ -2,6 +2,12 @@
   command = "npm run build"
   publish = "dist"
 
+[build.environment]
+  # AUTH0_DOMAIN i AUTH0_CLIENT_ID to wartości PUBLICZNE (nie sekrety) –
+  # wymagane przez każdą przeglądarkę w standardowym Auth0 SPA flow.
+  # Pomijamy je w skanowaniu sekretów, żeby Netlify nie blokował buildu.
+  SECRETS_SCAN_OMIT_KEYS = "AUTH0_CLIENT_ID,AUTH0_DOMAIN"
+
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
