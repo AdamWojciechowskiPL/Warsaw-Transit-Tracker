@@ -1,23 +1,4 @@
-import jwt from 'jsonwebtoken';
-import jwksClient from 'jwks-rsa';
-
-const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN!;
-const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE!;
-
-// Cache klienta JWKS (reużywany między wywołaniami w tej samej instancji)
-let client: ReturnType<typeof jwksClient> | null = null;
-
-function getJwksClient() {
-  if (!client) {
-    client = jwksClient({
-      jwksUri: `https://${AUTH0_DOMAIN}/.well-known/jwks.json`,
-      cache: true,
-      cacheMaxEntries: 5,
-      cacheMaxAge: 600_000, // 10 minut
-    });
-  }
-  return client;
-}
+import { HandlerContext } from '@netlify/functions';
 
 export interface AuthUser {
   sub: string;
@@ -25,40 +6,20 @@ export interface AuthUser {
   name?: string;
 }
 
-export async function verifyToken(authHeader: string | undefined): Promise<AuthUser | null> {
-  if (!authHeader?.startsWith('Bearer ')) return null;
+// Funkcja wyciągająca usera z kontekstu Netlify Functions.
+// Działa TYLKO jeśli Netlify Identity zweryfikowało token przed wejściem do funkcji.
+// Wymaga nagłówka Authorization: Bearer <token>
+export function getUserFromContext(context: HandlerContext): AuthUser | null {
+  const { clientContext } = context;
+  const user = clientContext?.user;
 
-  const token = authHeader.split(' ')[1];
-
-  try {
-    const decoded = await new Promise<any>((resolve, reject) => {
-      jwt.verify(
-        token,
-        (header, callback) => {
-          getJwksClient().getSigningKey(header.kid, (err, key) => {
-            if (err) return callback(err);
-            callback(null, key!.getPublicKey());
-          });
-        },
-        {
-          audience: AUTH0_AUDIENCE,
-          issuer: `https://${AUTH0_DOMAIN}/`,
-          algorithms: ['RS256'],
-        },
-        (err, decoded) => {
-          if (err) reject(err);
-          else resolve(decoded);
-        }
-      );
-    });
-
-    return {
-      sub: decoded.sub,
-      email: decoded.email,
-      name: decoded.name || decoded['https://transit-tracker/name'],
-    };
-  } catch (err: any) {
-    console.error('[AUTH] Token verification failed:', err.message);
+  if (!user) {
     return null;
   }
+
+  return {
+    sub: user.sub,
+    email: user.email,
+    name: user.user_metadata?.full_name || user.email?.split('@')[0]
+  };
 }
