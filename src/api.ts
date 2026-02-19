@@ -1,20 +1,19 @@
-// API client dla frontend
+// API client dla frontend – Auth0 token
 const API_BASE = '/.netlify/functions/api/api/v1';
 
-function getToken(): string | null {
-  // Netlify Identity przechowuje token w window.netlifyIdentity
-  const ni = (window as any).netlifyIdentity;
-  if (ni && ni.currentUser && ni.currentUser()) {
-    return ni.currentUser().token?.access_token ?? null;
-  }
-  return null;
+// Token getter jest wstrzykiwany przez App po inicjalizacji Auth0
+let _getToken: (() => Promise<string | null>) | null = null;
+
+export function setTokenGetter(fn: () => Promise<string | null>) {
+  _getToken = fn;
 }
 
 async function apiFetch(path: string, options: RequestInit = {}): Promise<any> {
-  const token = getToken();
+  const token = _getToken ? await _getToken() : null;
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(options.headers as Record<string, string> ?? {})
+    ...(options.headers as Record<string, string> ?? {}),
   };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
@@ -30,20 +29,32 @@ export const api = {
 
   // Profiles
   getProfiles: () => apiFetch('/route-profiles'),
-  createProfile: (name: string) => apiFetch('/route-profiles', { method: 'POST', body: JSON.stringify({ name }) }),
-  updateProfile: (id: string, data: object) => apiFetch(`/route-profiles/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteProfile: (id: string) => apiFetch(`/route-profiles/${id}`, { method: 'DELETE' }),
-  setActiveProfile: (id: string) => apiFetch(`/route-profiles/${id}`, { method: 'PUT', body: JSON.stringify({ is_active: true }) }),
+  createProfile: (name: string) =>
+    apiFetch('/route-profiles', { method: 'POST', body: JSON.stringify({ name }) }),
+  updateProfile: (id: string, data: object) =>
+    apiFetch(`/route-profiles/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteProfile: (id: string) =>
+    apiFetch(`/route-profiles/${id}`, { method: 'DELETE' }),
+  setActiveProfile: (id: string) =>
+    apiFetch(`/route-profiles/${id}`, { method: 'PUT', body: JSON.stringify({ is_active: true }) }),
 
   // Segments
-  getSegments: (profileId: string) => apiFetch(`/route-profiles/${profileId}/segments`),
+  getSegments: (profileId: string) =>
+    apiFetch(`/route-profiles/${profileId}/segments`),
   replaceSegments: (profileId: string, segments: object[]) =>
-    apiFetch(`/route-profiles/${profileId}/segments`, { method: 'PUT', body: JSON.stringify({ segments }) }),
+    apiFetch(`/route-profiles/${profileId}/segments`, {
+      method: 'PUT',
+      body: JSON.stringify({ segments }),
+    }),
 
   // Transfer Config
-  getTransferConfig: (profileId: string) => apiFetch(`/route-profiles/${profileId}/transfer-config`),
+  getTransferConfig: (profileId: string) =>
+    apiFetch(`/route-profiles/${profileId}/transfer-config`),
   updateTransferConfig: (profileId: string, data: object) =>
-    apiFetch(`/route-profiles/${profileId}/transfer-config`, { method: 'PUT', body: JSON.stringify(data) }),
+    apiFetch(`/route-profiles/${profileId}/transfer-config`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
 
   // Recommendation
   getRecommendation: (profileId: string, limit = 5) =>
