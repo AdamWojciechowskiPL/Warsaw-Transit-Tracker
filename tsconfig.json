@@ -22,6 +22,6 @@
     
     /* USUNIĘTO linię "types" - TS sam znajdzie node i vite-env.d.ts */
   },
-  "include": ["src", "netlify/functions"],
+  "include": ["src"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
