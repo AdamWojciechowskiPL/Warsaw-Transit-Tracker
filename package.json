@@ -11,10 +11,11 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
+    "@auth0/auth0-react": "^2.2.4",
     "@neondatabase/serverless": "^0.9.0",
     "date-fns": "^3.3.1",
+    "jose": "^5.2.3",
     "lucide-react": "^0.330.0",
-    "netlify-identity-widget": "^1.9.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.22.0"
@@ -22,7 +23,6 @@
   "devDependencies": {
     "@netlify/functions": "^2.6.0",
     "@types/aws-lambda": "^8.10.133",
-    "@types/netlify-identity-widget": "^1.9.6",
     "@types/node": "^20.11.19",
     "@types/react": "^18.2.56",
     "@types/react-dom": "^18.2.19",
