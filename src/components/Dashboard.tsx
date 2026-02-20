@@ -27,13 +27,14 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     setError(null);
     try {
       const data = await api.getRecommendation(activeProfile.id, 8);
+      const filteredOptions = getChronologicalUniqueOptions(data.options);
       setResult({
         ...data,
-        options: getChronologicalUniqueOptions(data.options),
+        options: filteredOptions,
       });
       setLastRefresh(new Date());
-      if (data.options.length > 0 && !selectedOptionId) {
-        setSelectedOptionId(data.options[0].id);
+      if (filteredOptions.length > 0 && !selectedOptionId) {
+        setSelectedOptionId(filteredOptions[0].id);
       }
     } catch (e: any) {
       setError(e.message);
@@ -200,7 +201,17 @@ function getChronologicalUniqueOptions(options: TransferOption[]): TransferOptio
 
   return [...grouped.values()]
     .map((group) => chooseBestTransferForFirstRide(group))
+    .filter((option) => isChronologicallyValid(option))
     .sort((a, b) => optionChronologicalSec(a) - optionChronologicalSec(b));
+}
+
+function isChronologicallyValid(option: TransferOption): boolean {
+  const trainDeparture = departureSec(option.train);
+  const transferArrival = getTransferStationArrivalTime(option);
+
+  // Odfiltruj błędne warianty, gdzie „przyjazd do przesiadki” jest przed
+  // odjazdem pociągu z pierwszej stacji (najczęściej oznacza zły kierunek).
+  return transferArrival >= trainDeparture;
 }
 
 function sortTransfersForLive(options: TransferOption[]): TransferOption[] {
