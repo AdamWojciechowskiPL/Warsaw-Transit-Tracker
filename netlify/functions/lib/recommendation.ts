@@ -157,7 +157,7 @@ export class RecommendationEngine {
         const transfer = byTripId.get(board.trip_id);
         if (!transfer) return false;
 
-        return this.timeDiffSec(board, transfer) > 0;
+        return this.absoluteTimeDiffSec(board, transfer) > 0;
       });
       console.log(`[RecEngine] Filtered WKD departures by direction: ${boardDepartures.length} -> ${filteredBoardDepartures.length}`);
       console.log(`[RecEngine] Direction filter matched trip_id count: ${byTripId.size}`);
@@ -350,15 +350,24 @@ export class RecommendationEngine {
     );
   }
 
-  private timeDiffSec(from: Departure, to: Departure): number {
-    const fromSec = from.live_sec ?? from.scheduled_sec;
-    let toSec = to.live_sec ?? to.scheduled_sec;
+  private absoluteTimeDiffSec(from: Departure, to: Departure): number {
+    const fromEpoch = this.toEpochSec(from);
+    const toEpoch = this.toEpochSec(to);
+    return toEpoch - fromEpoch;
+  }
 
-    if (toSec < fromSec) {
-      toSec += 86400;
-    }
+  private toEpochSec(departure: Departure): number {
+    const date = departure.date || this.todayDateYYYYMMDD();
+    const year = Number(date.slice(0, 4));
+    const month = Number(date.slice(4, 6));
+    const day = Number(date.slice(6, 8));
+    const sec = departure.live_sec ?? departure.scheduled_sec;
+    const dayEpoch = Date.UTC(year, month - 1, day) / 1000;
+    return dayEpoch + sec;
+  }
 
-    return toSec - fromSec;
+  private todayDateYYYYMMDD(): string {
+    return new Date().toISOString().slice(0, 10).replace(/-/g, '');
   }
 
   private describeDepartureWindow(departures: Departure[]): string {

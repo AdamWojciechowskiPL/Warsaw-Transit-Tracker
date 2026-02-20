@@ -42,7 +42,9 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       });
       setLastRefresh(new Date());
       if (dashboardOptions.length > 0 && !selectedOptionId) {
-        setSelectedOptionId(dashboardOptions[0].id);
+        const now = nowSecLocal();
+        const firstFuture = dashboardOptions.find((opt) => !isTrainInTransit(opt, now));
+        setSelectedOptionId((firstFuture ?? dashboardOptions[0]).id);
       }
     } catch (e: any) {
       setError(e.message);
@@ -77,7 +79,13 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     );
   }
 
-  const selectedOption = result?.options.find(o => o.id === selectedOptionId) ?? result?.options[0] ?? null;
+  const now = nowSecLocal();
+  const inTransitDashboardOptions = (result?.options ?? []).filter((opt) => isTrainInTransit(opt, now));
+  const futureDashboardOptions = (result?.options ?? []).filter((opt) => !isTrainInTransit(opt, now));
+  const selectedOption = (result?.options ?? []).find(o => o.id === selectedOptionId)
+    ?? futureDashboardOptions[0]
+    ?? inTransitDashboardOptions[0]
+    ?? null;
   const selectedFirstRideKey = selectedOption ? getFirstRideKey(selectedOption) : null;
   const transferChoices = selectedFirstRideKey
     ? sortTransfersForLive(allOptions.filter((o) => getFirstRideKey(o) === selectedFirstRideKey))
@@ -143,17 +151,36 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
         />
       ) : (
         <>
+          {inTransitDashboardOptions.length > 0 && (
+            <div style={styles.alternativesSection}>
+              <h3 style={styles.sectionTitle}>Połączenia w ruchu (jeszcze przed przesiadką)</h3>
+              <div style={styles.alternativesList}>
+                {inTransitDashboardOptions.map((opt) => (
+                  <AlternativeCard
+                    key={opt.id}
+                    option={opt}
+                    isSelected={opt.id === selectedOptionId}
+                    onClick={() => {
+                      setSelectedOptionId(opt.id);
+                      setIsLiveMode(true);
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
           {selectedOption && (
             <BestOptionCard 
               option={selectedOption} 
               onStartLive={() => setIsLiveMode(true)}
             />
           )}
-          {result && result.options.length > 1 && (
+          {futureDashboardOptions.length > 1 && (
             <div style={styles.alternativesSection}>
               <h3 style={styles.sectionTitle}>Alternatywy</h3>
               <div style={styles.alternativesList}>
-                {result.options.map((opt) => (
+                {futureDashboardOptions.map((opt) => (
                   <AlternativeCard
                     key={opt.id}
                     option={opt}
@@ -267,6 +294,12 @@ function getTransferStationArrivalTime(option: TransferOption): number {
     return option.train_transfer_time_sec;
   }
   return option.ready_sec - option.walk_sec - option.exit_buffer_sec;
+}
+
+function isTrainInTransit(option: TransferOption, nowSec: number): boolean {
+  const trainDepartureSec = departureSec(option.train);
+  const transferArrivalSec = getTransferStationArrivalTime(option);
+  return nowSec >= trainDepartureSec && nowSec < transferArrivalSec;
 }
 
 function BestOptionCard({ option, onStartLive }: { option: TransferOption; onStartLive: () => void }) {
