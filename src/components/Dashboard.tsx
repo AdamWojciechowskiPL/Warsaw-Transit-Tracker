@@ -267,11 +267,18 @@ function riskScore(risk: TransferOption['risk']): number {
 
 function chooseBestTransferForFirstRide(options: TransferOption[]): TransferOption {
   return [...options].sort((a, b) => {
+    // Preferujemy najszybszy realny odjazd autobusu dla tego samego pociągu,
+    // aby domyślnie wybierać wariant bez zbędnie długiego czekania.
+    const busCmp = departureSec(a.bus) - departureSec(b.bus);
+    if (busCmp !== 0) return busCmp;
+
     const riskCmp = riskScore(a.risk) - riskScore(b.risk);
     if (riskCmp !== 0) return riskCmp;
+
     const bufferCmp = b.buffer_sec - a.buffer_sec;
     if (bufferCmp !== 0) return bufferCmp;
-    return departureSec(a.bus) - departureSec(b.bus);
+
+    return optionChronologicalSec(a) - optionChronologicalSec(b);
   })[0];
 }
 
@@ -497,6 +504,22 @@ function LiveGuidanceView({ option, transferChoices, onSwitchAlternative, tripDe
             <div style={styles.liveStepTime}>
               Odjazd: <strong>{busTime}</strong> {formatDelay(option.bus.delay_sec)}
             </div>
+            {alternatives.length > 0 && (
+              <div style={styles.transferAlternativesInline}>
+                <span style={styles.transferAlternativesLabel}>Alternatywy przesiadki:</span>
+                <div style={styles.transferAlternativesList}>
+                  {alternatives.map((alt) => (
+                    <button
+                      key={alt.id}
+                      style={styles.transferAlternativeChip}
+                      onClick={() => onSwitchAlternative(alt.id)}
+                    >
+                      {secToHHMM(departureSec(alt.bus))} • {alt.bus.stop_id ?? 'przesiadka'} • {alt.bus.route_id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div style={{ ...styles.liveBuffer, color: riskC }}>
               Pozostało na przesiadkę: {formatBuffer(option.buffer_sec)}
             </div>
@@ -536,20 +559,6 @@ function LiveGuidanceView({ option, transferChoices, onSwitchAlternative, tripDe
         Monitoring live: opóźnienia WKD/ZTM i lista przesiadek odświeżają się automatycznie co 25 sekund.
       </div>
 
-      {(isRisky || alternatives.length > 0) && (
-        <div style={styles.liveAlternatives}>
-          <h4 style={{ margin: '0 0 12px 0' }}>Najbliższe opcje przesiadki (sortowane wg realnego przyjazdu):</h4>
-          {alternatives.length === 0 ? (
-            <p style={{ fontSize: 14, color: '#6b7280' }}>Brak kolejnych opcji przesiadki dla monitorowanego kursu.</p>
-          ) : (
-            <div style={styles.alternativesList}>
-              {alternatives.map(opt => (
-                <AlternativeCard key={opt.id} option={opt} isSelected={false} onClick={() => onSwitchAlternative(opt.id)} />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -721,7 +730,32 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 6, padding: '4px 8px', fontWeight: 600, fontSize: 13
   },
   liveBuffer: { marginTop: 8, fontWeight: 700, fontSize: 15 },
-  liveAlternatives: { marginTop: 24, paddingTop: 16, borderTop: '1px solid #e5e7eb' },
+  transferAlternativesInline: {
+    marginTop: 8,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
+  transferAlternativesLabel: {
+    fontSize: 13,
+    fontWeight: 700,
+    color: '#374151',
+  },
+  transferAlternativesList: {
+    display: 'flex',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  transferAlternativeChip: {
+    border: '1px solid #c7d2fe',
+    background: '#eef2ff',
+    color: '#1e40af',
+    borderRadius: 999,
+    padding: '4px 10px',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
   liveTripPanel: {
     marginTop: 14,
     border: '1px solid #dbeafe',
