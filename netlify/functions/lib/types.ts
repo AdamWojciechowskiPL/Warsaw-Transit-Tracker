@@ -87,3 +87,24 @@ export interface TransferOption {
   score: number;
   warnings: string[];
 }
+
+export interface TripStop {
+  trip_id: string;
+  stop_id: string;
+  stop_name: string;
+  lat: number;
+  lon: number;
+  seq: number;
+  scheduled_sec: number;
+  estimated_live_sec: number | null;
+  delay_sec: number | null;
+}
+
+export interface TripDetails {
+  trip_id: string;
+  shape: {
+    type: "LineString";
+    coordinates: Array<[number, number]>;
+  };
+  stops: TripStop[];
+}

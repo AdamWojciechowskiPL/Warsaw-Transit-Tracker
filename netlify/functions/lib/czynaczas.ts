@@ -1,16 +1,23 @@
-import { Departure } from "./types";
+import { Departure, TripDetails, TripStop } from "./types";
 
 // Cache in-memory (działa dopóki instancja Lambdy "żyje")
 const CACHE: Record<string, { data: any[]; timestamp: number }> = {};
+const TRIP_CACHE: Record<string, { data: TripDetails; timestamp: number }> = {};
 const CACHE_TTL_MS = 15_000; // 15 sekund
+const TRIP_CACHE_TTL_MS = 30_000; // 30 sekund
 const REQUEST_TIMEOUT_MS = 8_000; // Wydłużony timeout do 8s
 const MAX_RETRIES = 2; // Maksymalna liczba powtórzeń w przypadku błędów 5xx
-
-// Czynaczas zwraca różne schematy (historycznie i zależnie od regionu/źródła):
-// - starszy: { vehicle_type_id, line, direction, stop_id, day, departure_time, departure_time_live, vehicle_id, features }
-// - nowszy (częsty dla WKD): { trip_id, route_id, trip_headsign, stop_id, date, departure_time, departure_time_live, type, vehicle_id, ... }
+const STOP_DELAY_LOOKUP_CONCURRENCY = 6;
 
 type RawDeparture = Record<string, any>;
+
+type RawTripResponse = {
+  shape?: {
+    type?: string;
+    coordinates?: unknown;
+  };
+  stops?: unknown;
+};
 
 export class CzynaczasClient {
   async getDepartures(stopId: string, limit: number = 10): Promise<Departure[]> {
@@ -47,7 +54,7 @@ export class CzynaczasClient {
         }
 
         const text = await response.text();
-        
+
         try {
           rawData = JSON.parse(text);
         } catch (e) {
@@ -61,11 +68,11 @@ export class CzynaczasClient {
         }
 
         // Sukces - przerywamy pętlę retries
-        break; 
+        break;
       } catch (error: any) {
         lastError = error;
         console.error(`[CzynaczasClient] Error fetching ${stopId} (Attempt ${attempt}):`, error.message);
-        
+
         // Czekamy chwilę przed kolejną próbą (exponential backoff)
         if (attempt <= MAX_RETRIES) {
           const delayMs = attempt * 1000;
@@ -79,7 +86,7 @@ export class CzynaczasClient {
 
     if (rawData) {
       console.log(`[CzynaczasClient] Parsed ${rawData.length} items for ${stopId}`);
-      
+
       // Update Cache
       CACHE[stopId] = { data: rawData, timestamp: Date.now() };
 
@@ -97,11 +104,108 @@ export class CzynaczasClient {
     }
   }
 
+  async getTripDetails(tripId: string): Promise<TripDetails | null> {
+    const now = Date.now();
+    if (TRIP_CACHE[tripId] && (now - TRIP_CACHE[tripId].timestamp < TRIP_CACHE_TTL_MS)) {
+      return TRIP_CACHE[tripId].data;
+    }
+
+    const encodedTripId = encodeURIComponent(tripId);
+    const url = `https://czynaczas.pl/api/warsaw/trip?trip_id=${encodedTripId}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Trip API error: ${response.status}`);
+    }
+
+    const raw = await response.json() as RawTripResponse;
+    if (!raw.shape || raw.shape.type !== "LineString" || !Array.isArray(raw.shape.coordinates) || !Array.isArray(raw.stops)) {
+      return null;
+    }
+
+    const stops = this.normalizeTripStops(raw.stops, tripId);
+    const stopsWithLive = await this.enrichStopsWithLiveDelay(stops);
+
+    const details: TripDetails = {
+      trip_id: tripId,
+      shape: {
+        type: "LineString",
+        coordinates: raw.shape.coordinates as Array<[number, number]>
+      },
+      stops: stopsWithLive,
+    };
+
+    TRIP_CACHE[tripId] = { data: details, timestamp: Date.now() };
+    return details;
+  }
+
+  private async enrichStopsWithLiveDelay(stops: TripStop[]): Promise<TripStop[]> {
+    const results: TripStop[] = [...stops];
+
+    let index = 0;
+    const workers = Array.from({ length: Math.min(STOP_DELAY_LOOKUP_CONCURRENCY, stops.length) }).map(async () => {
+      while (index < stops.length) {
+        const currentIndex = index++;
+        const stop = stops[currentIndex];
+        const live = await this.getTripLiveAtStop(stop.stop_id, stop.trip_id);
+
+        if (live !== null) {
+          const delaySec = live - stop.scheduled_sec;
+          results[currentIndex] = {
+            ...stop,
+            estimated_live_sec: live,
+            delay_sec: delaySec,
+          };
+        }
+      }
+    });
+
+    await Promise.all(workers);
+    return results;
+  }
+
+  private async getTripLiveAtStop(stopId: string, tripId: string): Promise<number | null> {
+    try {
+      const departures = await this.getDepartures(stopId, 40);
+      const match = departures.find((d) => d.trip_id === tripId);
+      return match?.live_sec ?? null;
+    } catch (error) {
+      console.warn(`[CzynaczasClient] Trip live lookup failed for stop=${stopId}, trip=${tripId}`, error);
+      return null;
+    }
+  }
+
+  private normalizeTripStops(rawStops: unknown, fallbackTripId: string): TripStop[] {
+    if (!Array.isArray(rawStops)) return [];
+
+    return rawStops
+      .map((item): TripStop | null => {
+        if (!Array.isArray(item) || item.length < 8) return null;
+
+        const [tripId, scheduledSec, seq, _variant, stopId, stopName, lat, lon] = item;
+
+        if (typeof stopId !== "string" || typeof stopName !== "string") return null;
+
+        return {
+          trip_id: typeof tripId === "string" ? tripId : fallbackTripId,
+          stop_id: stopId,
+          stop_name: stopName,
+          lat: Number(lat),
+          lon: Number(lon),
+          seq: Number(seq),
+          scheduled_sec: Number(scheduledSec),
+          estimated_live_sec: null,
+          delay_sec: null,
+        };
+      })
+      .filter((s): s is TripStop => s !== null)
+      .sort((a, b) => a.seq - b.seq);
+  }
+
   private normalizeDate(raw: RawDeparture): string {
     const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
 
     // Nowszy schemat: date = "YYYYMMDD"
-    if (typeof raw.date === 'string' && /^\\d{8}$/.test(raw.date)) {
+    if (typeof raw.date === 'string' && /^\d{8}$/.test(raw.date)) {
       return raw.date;
     }
 
@@ -167,6 +271,6 @@ export class CzynaczasClient {
       return timeA - timeB;
     });
 
-    return departures;
+    return departures.slice(0, limit);
   }
 }

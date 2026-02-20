@@ -46,4 +46,6 @@ export const api = {
     }),
   getRecommendation: (profileId: string, limit = 5) =>
     apiFetch(`/route/recommendation?profile_id=${profileId}&limit=${limit}`),
+  getTripDetails: (tripId: string) =>
+    apiFetch(`/route/trip-details?trip_id=${encodeURIComponent(tripId)}`),
 };
