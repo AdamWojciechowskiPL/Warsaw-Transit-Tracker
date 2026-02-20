@@ -3,7 +3,8 @@ import { Departure } from "./types";
 // Cache in-memory (działa dopóki instancja Lambdy "żyje")
 const CACHE: Record<string, { data: any[]; timestamp: number }> = {};
 const CACHE_TTL_MS = 15_000; // 15 sekund
-const REQUEST_TIMEOUT_MS = 5_000; // Zwiększamy timeout do 5s dla pewności
+const REQUEST_TIMEOUT_MS = 8_000; // Wydłużony timeout do 8s
+const MAX_RETRIES = 2; // Maksymalna liczba powtórzeń w przypadku błędów 5xx
 
 // Czynaczas zwraca różne schematy (historycznie i zależnie od regionu/źródła):
 // - starszy: { vehicle_type_id, line, direction, stop_id, day, departure_time, departure_time_live, vehicle_id, features }
@@ -13,7 +14,7 @@ type RawDeparture = Record<string, any>;
 
 export class CzynaczasClient {
   async getDepartures(stopId: string, limit: number = 10): Promise<Departure[]> {
-    const url = `https://czynaczas.pl/api/warsaw/timetable/${stopId}?limit=40`; // Pobieramy więcej by rec engine miał z czego filtrować
+    const url = `https://czynaczas.pl/api/warsaw/timetable/${stopId}?limit=40`;
 
     const now = Date.now();
     console.log(`[CzynaczasClient] Requesting departures for stopId=${stopId}`);
@@ -26,57 +27,73 @@ export class CzynaczasClient {
 
     console.log(`[CzynaczasClient] API FETCH: ${url}`);
 
-    // 2. Fetch with Timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    // 2. Fetch with Retries & Timeout
+    let lastError: Error | null = null;
+    let rawData: RawDeparture[] | null = null;
 
-    try {
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
+    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-      console.log(`[CzynaczasClient] Response status: ${response.status} ${response.statusText}`);
-
-      if (!response.ok) {
-        throw new Error(`External API error: ${response.status}`);
-      }
-
-      const text = await response.text();
-      console.log(`[CzynaczasClient] Raw response length: ${text.length} chars`);
-
-      let rawData: RawDeparture[];
       try {
-        rawData = JSON.parse(text);
-      } catch (e) {
-        console.error(`[CzynaczasClient] JSON Parse Error. Raw text prefix: ${text.substring(0, 200)}...`);
-        throw e;
-      }
+        console.log(`[CzynaczasClient] Fetch attempt ${attempt}/${MAX_RETRIES + 1}`);
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
 
-      if (!Array.isArray(rawData)) {
-        console.warn(`[CzynaczasClient] Expected array, got ${typeof rawData}:`, rawData);
-        rawData = [];
-      }
+        console.log(`[CzynaczasClient] Response status: ${response.status} ${response.statusText}`);
 
+        if (!response.ok) {
+          throw new Error(`External API error: ${response.status}`);
+        }
+
+        const text = await response.text();
+        
+        try {
+          rawData = JSON.parse(text);
+        } catch (e) {
+          console.error(`[CzynaczasClient] JSON Parse Error. Raw text prefix: ${text.substring(0, 200)}...`);
+          throw e;
+        }
+
+        if (!Array.isArray(rawData)) {
+          console.warn(`[CzynaczasClient] Expected array, got ${typeof rawData}:`, rawData);
+          rawData = [];
+        }
+
+        // Sukces - przerywamy pętlę retries
+        break; 
+      } catch (error: any) {
+        lastError = error;
+        console.error(`[CzynaczasClient] Error fetching ${stopId} (Attempt ${attempt}):`, error.message);
+        
+        // Czekamy chwilę przed kolejną próbą (exponential backoff)
+        if (attempt <= MAX_RETRIES) {
+          const delayMs = attempt * 1000;
+          console.log(`[CzynaczasClient] Retrying in ${delayMs}ms...`);
+          await new Promise(res => setTimeout(res, delayMs));
+        }
+      } finally {
+        clearTimeout(timeoutId); // Upewnij się, że timer jest zawsze czyszczony
+      }
+    }
+
+    if (rawData) {
       console.log(`[CzynaczasClient] Parsed ${rawData.length} items for ${stopId}`);
-      if (rawData.length > 0) {
-        console.log(`[CzynaczasClient] First item sample:`, JSON.stringify(rawData[0]));
-      } else {
-        console.log(`[CzynaczasClient] Received EMPTY array from API for ${stopId}`);
-      }
-
+      
       // Update Cache
-      CACHE[stopId] = { data: rawData, timestamp: now };
+      CACHE[stopId] = { data: rawData, timestamp: Date.now() };
 
       const normalized = this.normalize(rawData, limit);
       console.log(`[CzynaczasClient] Normalized ${normalized.length} items (limit=${limit})`);
       return normalized;
-    } catch (error: any) {
-      console.error(`[CzynaczasClient] Error fetching ${stopId}:`, error);
+    } else {
+      console.error(`[CzynaczasClient] All attempts failed for ${stopId}. Last error:`, lastError);
 
       if (CACHE[stopId]) {
         console.warn(`[CzynaczasClient] CACHE STALE fallback for ${stopId}`);
         return this.normalize(CACHE[stopId].data, limit);
       }
-      return [];
+      return []; // Bezpieczny fallback na puste dane, by nie wysypywać całej strony
     }
   }
 
@@ -150,8 +167,6 @@ export class CzynaczasClient {
       return timeA - timeB;
     });
 
-    // ZWRACAMY WSZYSTKO BEZ OBCINANIA DO limit - obcięcie limit nastąpi po filtracji kierunków w silniku rekomendacji (w RecommendationEngine)
-    // "limit" zostanie przeniesiony jako filtr zwracany na samym koncu logiki RecommendationEngine.
     return departures;
   }
 }
