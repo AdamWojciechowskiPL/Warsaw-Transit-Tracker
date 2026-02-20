@@ -14,6 +14,8 @@ type TrainCandidate = {
   warnings: string[];
 };
 
+const MAX_TRANSFERS_PER_FIRST_RIDE = 4;
+
 export class RecommendationEngine {
   private client: CzynaczasClient;
 
@@ -150,8 +152,12 @@ export class RecommendationEngine {
     let filteredBoardDepartures = boardDepartures;
     if (transferStopId && byTripId.size > 0) {
       filteredBoardDepartures = boardDepartures.filter(board => {
-        if (!board.trip_id) return true; 
-        return byTripId.has(board.trip_id); 
+        if (!board.trip_id) return false;
+
+        const transfer = byTripId.get(board.trip_id);
+        if (!transfer) return false;
+
+        return this.timeDiffSec(board, transfer) > 0;
       });
       console.log(`[RecEngine] Filtered WKD departures by direction: ${boardDepartures.length} -> ${filteredBoardDepartures.length}`);
       console.log(`[RecEngine] Direction filter matched trip_id count: ${byTripId.size}`);
@@ -224,7 +230,7 @@ export class RecommendationEngine {
     // Filtrujemy na wejściu (wcześniej nie było i braliśmy historyczne / z innej daty jako pierwsze!)
     // Sort train candidates chronologically by transfer time
     trainCandidates.sort((a, b) => a.transfer_time_sec - b.transfer_time_sec);
-    const trainTop = trainCandidates.slice(0, 8);
+    const trainTop = trainCandidates.slice(0, Math.max(limit, 8));
     
     stats.trainCandidatesConsidered = trainTop.length;
     console.log(`[RecEngine] Evaluating top train candidates: ${trainTop.length}/${trainCandidates.length}`);
@@ -247,73 +253,112 @@ export class RecommendationEngine {
             .filter(d => d.route_id === busLine);
 
           // Find first bus after readySec
-          const busDep = busDeps.find(d => {
+          const matchingBusDeps = busDeps.filter(d => {
             const busTime = d.live_sec ?? d.scheduled_sec;
             if (readySec > 80000 && busTime < 10000) return true; // crossed midnight handling
             return busTime >= readySec;
           });
 
-          if (!busDep) {
+          if (matchingBusDeps.length === 0) {
             stats.missingBusDepartures += 1;
             console.log(`[RecEngine] No bus match: line=${busLine}, variant=${variant ?? '-'}, stop=${stopId}, ready_sec=${readySec} (${this.toIsoTime(readySec)}), checked_departures=${busDeps.length}`);
             continue;
           }
 
-          const busTime = busDep.live_sec ?? busDep.scheduled_sec;
-          let bufferSec = busTime - readySec;
-          if (readySec > 80000 && busTime < 10000) {
-              bufferSec = (busTime + 86400) - readySec;
+          const busMatchesForVariant = matchingBusDeps.slice(0, 2);
+
+          for (const busDep of busMatchesForVariant) {
+            const busTime = busDep.live_sec ?? busDep.scheduled_sec;
+            let bufferSec = busTime - readySec;
+            if (readySec > 80000 && busTime < 10000) {
+                bufferSec = (busTime + 86400) - readySec;
+            }
+
+            const warnings: string[] = [];
+            warnings.push(...cand.warnings);
+            if (!cand.board.live_sec) warnings.push('Brak danych live WKD – większe ryzyko');
+            if (!busDep.live_sec) warnings.push(`Brak danych live ZTM dla linii ${busLine}`);
+
+            let risk: "LOW" | "MED" | "HIGH";
+            if (bufferSec < config.min_transfer_buffer_sec) {
+              risk = "HIGH";
+            } else if (bufferSec <= 300) {
+              risk = "MED";
+            } else {
+              risk = "LOW";
+            }
+            if (!cand.board.live_sec && risk === "LOW") risk = "MED";
+            stats.risk[risk] += 1;
+
+            let score = bufferSec;
+            if (!cand.board.live_sec) score -= 120;
+            if (!busDep.live_sec) score -= 60;
+            if (risk === "HIGH") score -= 300;
+            if (risk === "MED") score -= 100;
+
+            const optId = `${cand.board.scheduled_sec}_${busLine}_${variant ?? 'X'}_${busDep.scheduled_sec}`;
+
+            options.push({
+              id: optId,
+              train: cand.board,
+              train_transfer: cand.transfer,
+              train_transfer_time_sec: trainTransferTime,
+              bus: busDep,
+              bus_stop_variant: variant,
+              walk_sec: walkTimeSec,
+              exit_buffer_sec: config.exit_buffer_sec,
+              min_transfer_buffer_sec: config.min_transfer_buffer_sec,
+              ready_sec: readySec,
+              buffer_sec: bufferSec,
+              risk,
+              score,
+              warnings
+            });
           }
-
-          const warnings: string[] = [];
-          warnings.push(...cand.warnings);
-          if (!cand.board.live_sec) warnings.push('Brak danych live WKD – większe ryzyko');
-          if (!busDep.live_sec) warnings.push(`Brak danych live ZTM dla linii ${busLine}`);
-
-          let risk: "LOW" | "MED" | "HIGH";
-          if (bufferSec < config.min_transfer_buffer_sec) {
-            risk = "HIGH";
-          } else if (bufferSec <= 300) {
-            risk = "MED";
-          } else {
-            risk = "LOW";
-          }
-          if (!cand.board.live_sec && risk === "LOW") risk = "MED";
-          stats.risk[risk] += 1;
-
-          let score = bufferSec;
-          if (!cand.board.live_sec) score -= 120;
-          if (!busDep.live_sec) score -= 60;
-          if (risk === "HIGH") score -= 300;
-          if (risk === "MED") score -= 100;
-
-          const optId = `${cand.board.scheduled_sec}_${busLine}_${variant ?? 'X'}`;
-
-          options.push({
-            id: optId,
-            train: cand.board,
-            train_transfer: cand.transfer,
-            train_transfer_time_sec: trainTransferTime,
-            bus: busDep,
-            bus_stop_variant: variant,
-            walk_sec: walkTimeSec,
-            exit_buffer_sec: config.exit_buffer_sec,
-            min_transfer_buffer_sec: config.min_transfer_buffer_sec,
-            ready_sec: readySec,
-            buffer_sec: bufferSec,
-            risk,
-            score,
-            warnings
-          });
         }
       }
     }
 
-    options.sort((a, b) => b.score - a.score);
+    options.sort((a, b) => {
+      const trainTimeCmp = (a.train.live_sec ?? a.train.scheduled_sec) - (b.train.live_sec ?? b.train.scheduled_sec);
+      if (trainTimeCmp !== 0) return trainTimeCmp;
+
+      const scoreCmp = b.score - a.score;
+      if (scoreCmp !== 0) return scoreCmp;
+
+      return (a.bus.live_sec ?? a.bus.scheduled_sec) - (b.bus.live_sec ?? b.bus.scheduled_sec);
+    });
 
     console.log(`[RecEngine] Option diagnostics: variant_checks=${stats.variantChecks}, missing_bus_matches=${stats.missingBusDepartures}, risk_LOW=${stats.risk.LOW}, risk_MED=${stats.risk.MED}, risk_HIGH=${stats.risk.HIGH}`);
 
-    return options.slice(0, limit);
+    const groupedByFirstRide = new Map<string, TransferOption[]>();
+    for (const option of options) {
+      const trainKey = `${option.train.route_id}:${option.train.stop_id}:${option.train.scheduled_sec}`;
+      const curr = groupedByFirstRide.get(trainKey) ?? [];
+      curr.push(option);
+      groupedByFirstRide.set(trainKey, curr);
+    }
+
+    const selectedTrainGroups = [...groupedByFirstRide.values()]
+      .sort((a, b) => (a[0].train.live_sec ?? a[0].train.scheduled_sec) - (b[0].train.live_sec ?? b[0].train.scheduled_sec))
+      .slice(0, limit);
+
+    return selectedTrainGroups.flatMap((group) =>
+      group
+        .sort((a, b) => b.score - a.score)
+        .slice(0, MAX_TRANSFERS_PER_FIRST_RIDE)
+    );
+  }
+
+  private timeDiffSec(from: Departure, to: Departure): number {
+    const fromSec = from.live_sec ?? from.scheduled_sec;
+    let toSec = to.live_sec ?? to.scheduled_sec;
+
+    if (toSec < fromSec) {
+      toSec += 86400;
+    }
+
+    return toSec - fromSec;
   }
 
   private describeDepartureWindow(departures: Departure[]): string {
