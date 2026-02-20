@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { api } from '../api';
 import { RecommendationResult, TransferOption, RouteProfile, Departure } from '../types';
 import { secToHHMM, formatDelay, formatBuffer, riskColor, riskLabel } from '../utils/time';
-import { RefreshCw, AlertTriangle, Settings, ArrowRight, Activity, MapPin } from 'lucide-react';
+import { RefreshCw, AlertTriangle, Settings, Activity, MapPin } from 'lucide-react';
 
 const AUTO_REFRESH_INTERVAL = 25_000;
 
@@ -26,8 +26,11 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.getRecommendation(activeProfile.id, 5);
-      setResult(data);
+      const data = await api.getRecommendation(activeProfile.id, 8);
+      setResult({
+        ...data,
+        options: getChronologicalUniqueOptions(data.options),
+      });
       setLastRefresh(new Date());
       if (data.options.length > 0 && !selectedOptionId) {
         setSelectedOptionId(data.options[0].id);
@@ -66,6 +69,10 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   }
 
   const selectedOption = result?.options.find(o => o.id === selectedOptionId) ?? result?.options[0] ?? null;
+  const selectedFirstRideKey = selectedOption ? getFirstRideKey(selectedOption) : null;
+  const transferChoices = selectedFirstRideKey
+    ? sortTransfersForLive(result?.options.filter((o) => getFirstRideKey(o) === selectedFirstRideKey) ?? [])
+    : [];
 
   return (
     <div style={styles.container}>
@@ -122,7 +129,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       {isLiveMode && selectedOption ? (
         <LiveGuidanceView 
           option={selectedOption} 
-          allOptions={result?.options ?? []}
+          transferChoices={transferChoices}
           onSwitchAlternative={(id) => setSelectedOptionId(id)}
         />
       ) : (
@@ -137,7 +144,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
             <div style={styles.alternativesSection}>
               <h3 style={styles.sectionTitle}>Alternatywy</h3>
               <div style={styles.alternativesList}>
-                {result.options.map((opt, idx) => (
+                {result.options.map((opt) => (
                   <AlternativeCard
                     key={opt.id}
                     option={opt}
@@ -152,6 +159,63 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       )}
     </div>
   );
+}
+
+function departureSec(departure: Departure): number {
+  return departure.live_sec ?? departure.scheduled_sec;
+}
+
+function getFirstRideKey(option: TransferOption): string {
+  return option.train.trip_id ?? option.train.vehicle_id ?? `${option.train.route_id}:${departureSec(option.train)}`;
+}
+
+function optionChronologicalSec(option: TransferOption): number {
+  return departureSec(option.train);
+}
+
+function riskScore(risk: TransferOption['risk']): number {
+  if (risk === 'LOW') return 0;
+  if (risk === 'MED') return 1;
+  return 2;
+}
+
+function chooseBestTransferForFirstRide(options: TransferOption[]): TransferOption {
+  return [...options].sort((a, b) => {
+    const riskCmp = riskScore(a.risk) - riskScore(b.risk);
+    if (riskCmp !== 0) return riskCmp;
+    const bufferCmp = b.buffer_sec - a.buffer_sec;
+    if (bufferCmp !== 0) return bufferCmp;
+    return departureSec(a.bus) - departureSec(b.bus);
+  })[0];
+}
+
+function getChronologicalUniqueOptions(options: TransferOption[]): TransferOption[] {
+  const grouped = new Map<string, TransferOption[]>();
+  for (const option of options) {
+    const key = getFirstRideKey(option);
+    const curr = grouped.get(key) ?? [];
+    curr.push(option);
+    grouped.set(key, curr);
+  }
+
+  return [...grouped.values()]
+    .map((group) => chooseBestTransferForFirstRide(group))
+    .sort((a, b) => optionChronologicalSec(a) - optionChronologicalSec(b));
+}
+
+function sortTransfersForLive(options: TransferOption[]): TransferOption[] {
+  return [...options].sort((a, b) => {
+    const aReady = Math.max(getTransferStationArrivalTime(a) + a.walk_sec + a.exit_buffer_sec, a.ready_sec);
+    const bReady = Math.max(getTransferStationArrivalTime(b) + b.walk_sec + b.exit_buffer_sec, b.ready_sec);
+
+    const departureCmp = departureSec(a.bus) - departureSec(b.bus);
+    if (departureCmp !== 0) return departureCmp;
+
+    const readyCmp = aReady - bReady;
+    if (readyCmp !== 0) return readyCmp;
+
+    return riskScore(a.risk) - riskScore(b.risk);
+  });
 }
 
 function getTransferStationArrivalTime(option: TransferOption): number {
@@ -254,7 +318,7 @@ function BestOptionCard({ option, onStartLive }: { option: TransferOption; onSta
   );
 }
 
-function LiveGuidanceView({ option, allOptions, onSwitchAlternative }: { option: TransferOption; allOptions: TransferOption[]; onSwitchAlternative: (id: string) => void }) {
+function LiveGuidanceView({ option, transferChoices, onSwitchAlternative }: { option: TransferOption; transferChoices: TransferOption[]; onSwitchAlternative: (id: string) => void }) {
   const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
   const arrivalSec = getTransferStationArrivalTime(option);
   const arrivalTime = secToHHMM(arrivalSec);
@@ -263,8 +327,7 @@ function LiveGuidanceView({ option, allOptions, onSwitchAlternative }: { option:
 
   const isRisky = option.risk === 'HIGH' || option.buffer_sec < 0;
   
-  // Znajdź alternatywy, które odjeżdżają w podobnym czasie lub później, z pominięciem obecnej
-  const alternatives = allOptions.filter(o => o.id !== option.id && o.risk !== 'HIGH');
+  const alternatives = transferChoices.filter((o) => o.id !== option.id);
 
   return (
     <div style={styles.liveContainer}>
@@ -321,14 +384,18 @@ function LiveGuidanceView({ option, allOptions, onSwitchAlternative }: { option:
         </div>
       </div>
 
+      <div style={styles.liveMonitorInfo}>
+        Monitoring live: opóźnienia WKD/ZTM i lista przesiadek odświeżają się automatycznie co 25 sekund.
+      </div>
+
       {(isRisky || alternatives.length > 0) && (
         <div style={styles.liveAlternatives}>
-          <h4 style={{ margin: '0 0 12px 0' }}>Dostępne alternatywne przesiadki:</h4>
+          <h4 style={{ margin: '0 0 12px 0' }}>Dostępne przesiadki dla tego kursu (chronologicznie):</h4>
           {alternatives.length === 0 ? (
-            <p style={{ fontSize: 14, color: '#6b7280' }}>Brak innych bezpiecznych opcji.</p>
+            <p style={{ fontSize: 14, color: '#6b7280' }}>Brak kolejnych opcji przesiadki dla monitorowanego kursu.</p>
           ) : (
             <div style={styles.alternativesList}>
-              {alternatives.slice(0, 3).map(opt => (
+              {alternatives.map(opt => (
                 <AlternativeCard key={opt.id} option={opt} isSelected={false} onClick={() => onSwitchAlternative(opt.id)} />
               ))}
             </div>
@@ -482,5 +549,15 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 6, padding: '4px 8px', fontWeight: 600, fontSize: 13
   },
   liveBuffer: { marginTop: 8, fontWeight: 700, fontSize: 15 },
-  liveAlternatives: { marginTop: 24, paddingTop: 16, borderTop: '1px solid #e5e7eb' }
+  liveAlternatives: { marginTop: 24, paddingTop: 16, borderTop: '1px solid #e5e7eb' },
+  liveMonitorInfo: {
+    marginTop: 16,
+    padding: '10px 12px',
+    borderRadius: 8,
+    border: '1px solid #bfdbfe',
+    background: '#eff6ff',
+    color: '#1d4ed8',
+    fontSize: 13,
+    fontWeight: 600,
+  }
 };
