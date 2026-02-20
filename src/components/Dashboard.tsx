@@ -29,13 +29,11 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     try {
       const data = await api.getRecommendation(activeProfile.id, 8) as RecommendationResult;
 
-      // Najpierw odfiltruj błędne opcje (np. zły kierunek), a dopiero potem rób deduplikację.
-      // W przeciwnym razie możemy wybrać „najlepszy" wariant z grupy, który jest błędny chronologicznie,
-      // i wyrzucić całą grupę, mimo że zawierała poprawną alternatywę.
-      const chronological = data.options.filter((option) => isChronologicallyValid(option));
-
-      setAllOptions(chronological);
-      const filteredOptions = getChronologicalUniqueOptions(chronological);
+      // API zwraca już gotową listę rekomendacji. Na froncie usuwamy wyłącznie
+      // techniczne duplikaty, ale nie odrzucamy opcji po walidacji chronologii,
+      // bo może to ukryć poprawne warianty przesiadki dla użytkownika.
+      setAllOptions(data.options);
+      const filteredOptions = getUniqueOptions(data.options);
 
       setResult({
         ...data,
@@ -219,16 +217,14 @@ function chooseBestTransferForFirstRide(options: TransferOption[]): TransferOpti
   })[0];
 }
 
-function getChronologicalUniqueOptions(options: TransferOption[]): TransferOption[] {
-  const valid = options.filter((option) => isChronologicallyValid(option));
-
+function getUniqueOptions(options: TransferOption[]): TransferOption[] {
   // Grupuj po kluczu pociąg + autobus + wariant przystanku.
   // Dzięki temu różne połączenia autobusowe dla tego samego pociągu WKD
   // są wyświetlane jako osobne opcje na liście rekomendacji.
   // Prawdziwe duplikaty (ten sam pociąg i ten sam kurs autobusu) są scalane
   // i wybierany jest najlepszy wariant z grupy.
   const grouped = new Map<string, TransferOption[]>();
-  for (const option of valid) {
+  for (const option of options) {
     const key = getOptionDedupeKey(option);
     const curr = grouped.get(key) ?? [];
     curr.push(option);
@@ -243,15 +239,6 @@ function getChronologicalUniqueOptions(options: TransferOption[]): TransferOptio
       // Jeśli ten sam pociąg, sortuj wg odjazdu autobusu
       return departureSec(a.bus) - departureSec(b.bus);
     });
-}
-
-function isChronologicallyValid(option: TransferOption): boolean {
-  const trainDeparture = departureSec(option.train);
-  const transferArrival = getTransferStationArrivalTime(option);
-
-  // Odfiltruj błędne warianty, gdzie „przyjazd do przesiadki" jest przed
-  // odjazdem pociągu z pierwszej stacji (najczęściej oznacza zły kierunek).
-  return transferArrival >= trainDeparture;
 }
 
 function sortTransfersForLive(options: TransferOption[]): TransferOption[] {
