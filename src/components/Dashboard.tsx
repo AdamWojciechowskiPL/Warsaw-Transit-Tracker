@@ -13,6 +13,7 @@ interface Props {
 
 export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   const [result, setResult] = useState<RecommendationResult | null>(null);
+  const [allOptions, setAllOptions] = useState<TransferOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null);
@@ -26,7 +27,8 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.getRecommendation(activeProfile.id, 8);
+      const data = await api.getRecommendation(activeProfile.id, 8) as RecommendationResult;
+      setAllOptions(data.options.filter((option) => isChronologicallyValid(option)));
       const filteredOptions = getChronologicalUniqueOptions(data.options);
       setResult({
         ...data,
@@ -44,10 +46,12 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   }, [activeProfile, selectedOptionId]);
 
   useEffect(() => {
+    if (isLiveMode) return;
+
     fetchRecommendations();
     const interval = setInterval(fetchRecommendations, AUTO_REFRESH_INTERVAL);
     return () => clearInterval(interval);
-  }, [fetchRecommendations]);
+  }, [fetchRecommendations, isLiveMode]);
 
   // Jeśli jesteśmy w trybie live, ale wybrana opcja zniknęła (np. minęła),
   // znajdź pierwszą dostępną (najlepiej tę samą linię, lub po prostu pierwszą).
@@ -72,7 +76,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   const selectedOption = result?.options.find(o => o.id === selectedOptionId) ?? result?.options[0] ?? null;
   const selectedFirstRideKey = selectedOption ? getFirstRideKey(selectedOption) : null;
   const transferChoices = selectedFirstRideKey
-    ? sortTransfersForLive(result?.options.filter((o) => getFirstRideKey(o) === selectedFirstRideKey) ?? [])
+    ? sortTransfersForLive(allOptions.filter((o) => getFirstRideKey(o) === selectedFirstRideKey))
     : [];
 
   return (
@@ -216,11 +220,14 @@ function isChronologicallyValid(option: TransferOption): boolean {
 
 function sortTransfersForLive(options: TransferOption[]): TransferOption[] {
   return [...options].sort((a, b) => {
+    const aBusEta = departureSec(a.bus);
+    const bBusEta = departureSec(b.bus);
+
+    const etaCmp = aBusEta - bBusEta;
+    if (etaCmp !== 0) return etaCmp;
+
     const aReady = Math.max(getTransferStationArrivalTime(a) + a.walk_sec + a.exit_buffer_sec, a.ready_sec);
     const bReady = Math.max(getTransferStationArrivalTime(b) + b.walk_sec + b.exit_buffer_sec, b.ready_sec);
-
-    const departureCmp = departureSec(a.bus) - departureSec(b.bus);
-    if (departureCmp !== 0) return departureCmp;
 
     const readyCmp = aReady - bReady;
     if (readyCmp !== 0) return readyCmp;
@@ -330,13 +337,18 @@ function BestOptionCard({ option, onStartLive }: { option: TransferOption; onSta
 }
 
 function LiveGuidanceView({ option, transferChoices, onSwitchAlternative }: { option: TransferOption; transferChoices: TransferOption[]; onSwitchAlternative: (id: string) => void }) {
+  const trainDepartureSec = departureSec(option.train);
+  const transferArrivalSec = getTransferStationArrivalTime(option);
+  const busDepartureSec = departureSec(option.bus);
+
   const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
-  const arrivalSec = getTransferStationArrivalTime(option);
-  const arrivalTime = secToHHMM(arrivalSec);
+  const arrivalTime = secToHHMM(transferArrivalSec);
   const busTime = secToHHMM(option.bus.live_sec ?? option.bus.scheduled_sec);
   const riskC = riskColor(option.risk);
 
   const isRisky = option.risk === 'HIGH' || option.buffer_sec < 0;
+  const nowSec = nowSecLocal();
+  const livePosition = getLiveVehiclePositionLabel(nowSec, trainDepartureSec, transferArrivalSec, busDepartureSec);
   
   const alternatives = transferChoices.filter((o) => o.id !== option.id);
 
@@ -360,8 +372,17 @@ function LiveGuidanceView({ option, transferChoices, onSwitchAlternative }: { op
             <div style={styles.liveStepTime}>
               Odjazd: <strong>{trainTime}</strong> {formatDelay(option.train.delay_sec)}
             </div>
+            <div style={styles.liveStepTime}>Aktualna pozycja: <strong>{livePosition}</strong></div>
             <div style={styles.liveStepTime}>
               Dojazd na przesiadkę: <strong>{arrivalTime}</strong>
+            </div>
+            <div style={styles.liveStopsRow}>
+              Kolejne przystanki:
+              <span style={styles.stopChip}>{option.train.stop_id}</span>
+              <span style={styles.stopArrow}>→</span>
+              <span style={styles.stopChip}>{option.train_transfer?.stop_id ?? 'przesiadka'}</span>
+              <span style={styles.stopArrow}>→</span>
+              <span style={styles.stopChip}>{option.bus.stop_id}</span>
             </div>
           </div>
         </div>
@@ -401,7 +422,7 @@ function LiveGuidanceView({ option, transferChoices, onSwitchAlternative }: { op
 
       {(isRisky || alternatives.length > 0) && (
         <div style={styles.liveAlternatives}>
-          <h4 style={{ margin: '0 0 12px 0' }}>Dostępne przesiadki dla tego kursu (chronologicznie):</h4>
+          <h4 style={{ margin: '0 0 12px 0' }}>Najbliższe opcje przesiadki (sortowane wg realnego przyjazdu):</h4>
           {alternatives.length === 0 ? (
             <p style={{ fontSize: 14, color: '#6b7280' }}>Brak kolejnych opcji przesiadki dla monitorowanego kursu.</p>
           ) : (
@@ -420,6 +441,7 @@ function LiveGuidanceView({ option, transferChoices, onSwitchAlternative }: { op
 function AlternativeCard({ option, isSelected, onClick }: { option: TransferOption; isSelected: boolean; onClick: () => void; }) {
   const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
   const busTime = secToHHMM(option.bus.live_sec ?? option.bus.scheduled_sec);
+  const plannedBusTime = secToHHMM(option.bus.scheduled_sec);
   const riskC = riskColor(option.risk);
 
   return (
@@ -436,6 +458,8 @@ function AlternativeCard({ option, isSelected, onClick }: { option: TransferOpti
           <span style={{ fontWeight: 600 }}>🚂 {trainTime}</span>
           <span style={{ color: '#6b7280' }}>→</span>
           <span style={{ fontWeight: 600 }}>🚌 {option.bus.route_id} {busTime}</span>
+          <span style={{ color: '#6b7280', fontSize: 12 }}>plan: {plannedBusTime}</span>
+          <span style={{ fontSize: 12, color: option.bus.delay_sec && option.bus.delay_sec > 0 ? '#dc2626' : '#16a34a' }}>{formatDelay(option.bus.delay_sec)}</span>
           {option.bus_stop_variant && (
             <span style={styles.variantBadge}>Wariant {option.bus_stop_variant}</span>
           )}
@@ -449,6 +473,24 @@ function AlternativeCard({ option, isSelected, onClick }: { option: TransferOpti
       </div>
     </button>
   );
+}
+
+
+function nowSecLocal(): number {
+  const now = new Date();
+  return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+}
+
+function getLiveVehiclePositionLabel(
+  nowSec: number,
+  trainDepartureSec: number,
+  transferArrivalSec: number,
+  busDepartureSec: number
+): string {
+  if (nowSec < trainDepartureSec) return 'przed odjazdem (na stacji początkowej)';
+  if (nowSec < transferArrivalSec) return 'w drodze do przesiadki';
+  if (nowSec < busDepartureSec) return 'na przesiadce / dojście do autobusu';
+  return 'po przesiadce (autobus w trasie)';
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -555,6 +597,9 @@ const styles: Record<string, React.CSSProperties> = {
   liveStepContent: { background: '#f9fafb', padding: '12px 16px', borderRadius: 8, border: '1px solid #e5e7eb' },
   liveStepTitle: { fontWeight: 700, fontSize: 16, color: '#111827', marginBottom: 4 },
   liveStepTime: { fontSize: 14, color: '#4b5563', marginBottom: 2 },
+  liveStopsRow: { marginTop: 8, fontSize: 13, color: '#374151', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
+  stopChip: { background: '#e5e7eb', borderRadius: 999, padding: '2px 8px', fontWeight: 600, fontSize: 12 },
+  stopArrow: { color: '#9ca3af' },
   liveVariantBadge: {
     display: 'inline-block', marginTop: 8, background: '#1d4ed8', color: 'white',
     borderRadius: 6, padding: '4px 8px', fontWeight: 600, fontSize: 13
