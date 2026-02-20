@@ -126,7 +126,9 @@ export const handler: Handler = async (event: HandlerEvent, context: HandlerCont
     if (method === "GET" && path === "/route/recommendation") {
       console.log(`[API] Fetching recommendations...`);
       const profileId = event.queryStringParameters?.profile_id;
-      const limit = parseInt(event.queryStringParameters?.limit || "5");
+      const rawLimit = event.queryStringParameters?.limit || "5";
+      const limit = parseInt(rawLimit);
+      console.log(`[API] Recommendation request params: profile_id=${profileId ?? '-'}, limit_raw=${rawLimit}, limit_parsed=${limit}`);
 
       if (!profileId) {
         console.warn(`[API] Missing profile_id`);
@@ -134,6 +136,9 @@ export const handler: Handler = async (event: HandlerEvent, context: HandlerCont
       }
 
       const profileData = await db.getActiveProfileById(profileId, user.id);
+      if (profileData) {
+        console.log(`[API] Loaded profileData: profile=${profileData.profile.id}, segments=${profileData.segments.length}, walk_times_keys=${Object.keys(profileData.config.walk_times || {}).length}`);
+      }
       if (!profileData) {
         console.warn(`[API] Profile not found: ${profileId}`);
         return json(404, { error: "Profile not found or not accessible" });
@@ -142,6 +147,7 @@ export const handler: Handler = async (event: HandlerEvent, context: HandlerCont
       const engine = new RecommendationEngine();
       try {
         const result = await engine.getRecommendations(profileData, limit);
+        console.log(`[API] Recommendation meta: profile_id=${result.meta.profile_id}, ts=${result.meta.timestamp}, wkd=${result.meta.live_status.wkd}, ztm=${result.meta.live_status.ztm}`);
         console.log(`[API] Sending ${result.options.length} recommendations`);
         return json(200, result);
       } catch (err: any) {
