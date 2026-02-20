@@ -29,19 +29,22 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     try {
       const data = await api.getRecommendation(activeProfile.id, 8) as RecommendationResult;
 
-      // API zwraca już gotową listę rekomendacji. Na froncie usuwamy wyłącznie
-      // techniczne duplikaty, ale nie odrzucamy opcji po walidacji chronologii,
-      // bo może to ukryć poprawne warianty przesiadki dla użytkownika.
+      // Backend zwraca kilka opcji przesiadek dla jednego kursu WKD.
+      // Na dashboardzie pokazujemy tylko jedną (najlepszą) rekomendację
+      // dla każdego odjazdu pierwszego etapu, a pełną listę trzymamy
+      // do wykorzystania w trybie Live.
       setAllOptions(data.options);
-      const filteredOptions = getUniqueOptions(data.options);
+      const dashboardOptions = getDashboardOptions(data.options);
 
       setResult({
         ...data,
-        options: filteredOptions,
+        options: dashboardOptions,
       });
       setLastRefresh(new Date());
-      if (filteredOptions.length > 0 && !selectedOptionId) {
-        setSelectedOptionId(filteredOptions[0].id);
+      if (dashboardOptions.length > 0 && !selectedOptionId) {
+        const now = nowSecLocal();
+        const firstFuture = dashboardOptions.find((opt) => !isTrainInTransit(opt, now));
+        setSelectedOptionId((firstFuture ?? dashboardOptions[0]).id);
       }
     } catch (e: any) {
       setError(e.message);
@@ -51,12 +54,10 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   }, [activeProfile, selectedOptionId]);
 
   useEffect(() => {
-    if (isLiveMode) return;
-
     fetchRecommendations();
     const interval = setInterval(fetchRecommendations, AUTO_REFRESH_INTERVAL);
     return () => clearInterval(interval);
-  }, [fetchRecommendations, isLiveMode]);
+  }, [fetchRecommendations]);
 
   // Jeśli jesteśmy w trybie live, ale wybrana opcja zniknęła (np. minęła),
   // znajdź pierwszą dostępną (najlepiej tę samą linię, lub po prostu pierwszą).
@@ -78,7 +79,13 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     );
   }
 
-  const selectedOption = result?.options.find(o => o.id === selectedOptionId) ?? result?.options[0] ?? null;
+  const now = nowSecLocal();
+  const inTransitDashboardOptions = (result?.options ?? []).filter((opt) => isTrainInTransit(opt, now));
+  const futureDashboardOptions = (result?.options ?? []).filter((opt) => !isTrainInTransit(opt, now));
+  const selectedOption = (result?.options ?? []).find(o => o.id === selectedOptionId)
+    ?? futureDashboardOptions[0]
+    ?? inTransitDashboardOptions[0]
+    ?? null;
   const selectedFirstRideKey = selectedOption ? getFirstRideKey(selectedOption) : null;
   const transferChoices = selectedFirstRideKey
     ? sortTransfersForLive(allOptions.filter((o) => getFirstRideKey(o) === selectedFirstRideKey))
@@ -144,17 +151,36 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
         />
       ) : (
         <>
+          {inTransitDashboardOptions.length > 0 && (
+            <div style={styles.alternativesSection}>
+              <h3 style={styles.sectionTitle}>Połączenia w ruchu (jeszcze przed przesiadką)</h3>
+              <div style={styles.alternativesList}>
+                {inTransitDashboardOptions.map((opt) => (
+                  <AlternativeCard
+                    key={opt.id}
+                    option={opt}
+                    isSelected={opt.id === selectedOptionId}
+                    onClick={() => {
+                      setSelectedOptionId(opt.id);
+                      setIsLiveMode(true);
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
           {selectedOption && (
             <BestOptionCard 
               option={selectedOption} 
               onStartLive={() => setIsLiveMode(true)}
             />
           )}
-          {result && result.options.length > 1 && (
+          {futureDashboardOptions.length > 1 && (
             <div style={styles.alternativesSection}>
               <h3 style={styles.sectionTitle}>Alternatywy</h3>
               <div style={styles.alternativesList}>
-                {result.options.map((opt) => (
+                {futureDashboardOptions.map((opt) => (
                   <AlternativeCard
                     key={opt.id}
                     option={opt}
@@ -217,43 +243,44 @@ function chooseBestTransferForFirstRide(options: TransferOption[]): TransferOpti
   })[0];
 }
 
-function getUniqueOptions(options: TransferOption[]): TransferOption[] {
-  // Grupuj po kluczu pociąg + autobus + wariant przystanku.
-  // Dzięki temu różne połączenia autobusowe dla tego samego pociągu WKD
-  // są wyświetlane jako osobne opcje na liście rekomendacji.
-  // Prawdziwe duplikaty (ten sam pociąg i ten sam kurs autobusu) są scalane
-  // i wybierany jest najlepszy wariant z grupy.
-  const grouped = new Map<string, TransferOption[]>();
+function getDashboardOptions(options: TransferOption[]): TransferOption[] {
+  const dedupedByTrainBus = new Map<string, TransferOption[]>();
   for (const option of options) {
     const key = getOptionDedupeKey(option);
-    const curr = grouped.get(key) ?? [];
+    const curr = dedupedByTrainBus.get(key) ?? [];
     curr.push(option);
-    grouped.set(key, curr);
+    dedupedByTrainBus.set(key, curr);
   }
 
-  return [...grouped.values()]
+  const uniqueOptions = [...dedupedByTrainBus.values()]
+    .map((group) => chooseBestTransferForFirstRide(group));
+
+  const groupedByFirstRide = new Map<string, TransferOption[]>();
+  for (const option of uniqueOptions) {
+    const key = getFirstRideKey(option);
+    const curr = groupedByFirstRide.get(key) ?? [];
+    curr.push(option);
+    groupedByFirstRide.set(key, curr);
+  }
+
+  return [...groupedByFirstRide.values()]
     .map((group) => chooseBestTransferForFirstRide(group))
-    .sort((a, b) => {
-      const trainCmp = optionChronologicalSec(a) - optionChronologicalSec(b);
-      if (trainCmp !== 0) return trainCmp;
-      // Jeśli ten sam pociąg, sortuj wg odjazdu autobusu
-      return departureSec(a.bus) - departureSec(b.bus);
-    });
+    .sort((a, b) => optionChronologicalSec(a) - optionChronologicalSec(b));
 }
 
 function sortTransfersForLive(options: TransferOption[]): TransferOption[] {
   return [...options].sort((a, b) => {
-    const aBusEta = departureSec(a.bus);
-    const bBusEta = departureSec(b.bus);
+    const aArrival = getTransferStationArrivalTime(a);
+    const bArrival = getTransferStationArrivalTime(b);
 
-    const etaCmp = aBusEta - bBusEta;
-    if (etaCmp !== 0) return etaCmp;
+    const arrivalCmp = aArrival - bArrival;
+    if (arrivalCmp !== 0) return arrivalCmp;
 
-    const aReady = Math.max(getTransferStationArrivalTime(a) + a.walk_sec + a.exit_buffer_sec, a.ready_sec);
-    const bReady = Math.max(getTransferStationArrivalTime(b) + b.walk_sec + b.exit_buffer_sec, b.ready_sec);
+    const busCmp = departureSec(a.bus) - departureSec(b.bus);
+    if (busCmp !== 0) return busCmp;
 
-    const readyCmp = aReady - bReady;
-    if (readyCmp !== 0) return readyCmp;
+    const bufferCmp = b.buffer_sec - a.buffer_sec;
+    if (bufferCmp !== 0) return bufferCmp;
 
     return riskScore(a.risk) - riskScore(b.risk);
   });
@@ -267,6 +294,12 @@ function getTransferStationArrivalTime(option: TransferOption): number {
     return option.train_transfer_time_sec;
   }
   return option.ready_sec - option.walk_sec - option.exit_buffer_sec;
+}
+
+function isTrainInTransit(option: TransferOption, nowSec: number): boolean {
+  const trainDepartureSec = departureSec(option.train);
+  const transferArrivalSec = getTransferStationArrivalTime(option);
+  return nowSec >= trainDepartureSec && nowSec < transferArrivalSec;
 }
 
 function BestOptionCard({ option, onStartLive }: { option: TransferOption; onStartLive: () => void }) {
