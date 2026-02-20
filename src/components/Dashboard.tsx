@@ -28,8 +28,15 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     setError(null);
     try {
       const data = await api.getRecommendation(activeProfile.id, 8) as RecommendationResult;
-      setAllOptions(data.options.filter((option) => isChronologicallyValid(option)));
-      const filteredOptions = getChronologicalUniqueOptions(data.options);
+
+      // Najpierw odfiltruj błędne opcje (np. zły kierunek), a dopiero potem rób deduplikację.
+      // W przeciwnym razie możemy wybrać „najlepszy” wariant z grupy, który jest błędny chronologicznie,
+      // i wyrzucić całą grupę, mimo że zawierała poprawną alternatywę.
+      const chronological = data.options.filter((option) => isChronologicallyValid(option));
+
+      setAllOptions(chronological);
+      const filteredOptions = getChronologicalUniqueOptions(chronological);
+
       setResult({
         ...data,
         options: filteredOptions,
@@ -171,7 +178,9 @@ function departureSec(departure: Departure): number {
 }
 
 function getFirstRideKey(option: TransferOption): string {
-  return option.train.trip_id ?? option.train.vehicle_id ?? `${option.train.route_id}:${departureSec(option.train)}`;
+  // Klucz musi być stabilny i rozróżniać kolejne odjazdy.
+  // Nie polegamy wyłącznie na trip_id, bo bywa nieunikalne / brakujące.
+  return `${option.train.route_id}:${option.train.stop_id}:${option.train.scheduled_sec}`;
 }
 
 function optionChronologicalSec(option: TransferOption): number {
@@ -195,8 +204,10 @@ function chooseBestTransferForFirstRide(options: TransferOption[]): TransferOpti
 }
 
 function getChronologicalUniqueOptions(options: TransferOption[]): TransferOption[] {
+  const valid = options.filter((option) => isChronologicallyValid(option));
+
   const grouped = new Map<string, TransferOption[]>();
-  for (const option of options) {
+  for (const option of valid) {
     const key = getFirstRideKey(option);
     const curr = grouped.get(key) ?? [];
     curr.push(option);
@@ -205,7 +216,6 @@ function getChronologicalUniqueOptions(options: TransferOption[]): TransferOptio
 
   return [...grouped.values()]
     .map((group) => chooseBestTransferForFirstRide(group))
-    .filter((option) => isChronologicallyValid(option))
     .sort((a, b) => optionChronologicalSec(a) - optionChronologicalSec(b));
 }
 
