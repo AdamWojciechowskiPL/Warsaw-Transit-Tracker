@@ -30,7 +30,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       const data = await api.getRecommendation(activeProfile.id, 8) as RecommendationResult;
 
       // Najpierw odfiltruj błędne opcje (np. zły kierunek), a dopiero potem rób deduplikację.
-      // W przeciwnym razie możemy wybrać „najlepszy” wariant z grupy, który jest błędny chronologicznie,
+      // W przeciwnym razie możemy wybrać „najlepszy" wariant z grupy, który jest błędny chronologicznie,
       // i wyrzucić całą grupę, mimo że zawierała poprawną alternatywę.
       const chronological = data.options.filter((option) => isChronologicallyValid(option));
 
@@ -177,10 +177,26 @@ function departureSec(departure: Departure): number {
   return departure.live_sec ?? departure.scheduled_sec;
 }
 
+/**
+ * Klucz identyfikujący KURS POCIĄGU (używany w trybie Live do grupowania
+ * wszystkich opcji autobusowych dla aktualnie monitorowanego składu WKD).
+ * NIE używaj tego klucza do deduplikacji listy rekomendacji – tam potrzebny
+ * jest szerszy klucz uwzględniający też autobus (getOptionDedupeKey).
+ */
 function getFirstRideKey(option: TransferOption): string {
   // Klucz musi być stabilny i rozróżniać kolejne odjazdy.
   // Nie polegamy wyłącznie na trip_id, bo bywa nieunikalne / brakujące.
   return `${option.train.route_id}:${option.train.stop_id}:${option.train.scheduled_sec}`;
+}
+
+/**
+ * Klucz do deduplikacji opcji na liście rekomendacji.
+ * Łączy kurs pociągu z kursem autobusu i wariantem przystanku,
+ * dzięki czemu różne połączenia autobusowe dla tego samego pociągu
+ * są traktowane jako osobne opcje (a nie składane w jedną).
+ */
+function getOptionDedupeKey(option: TransferOption): string {
+  return `${getFirstRideKey(option)}:${option.bus.route_id}:${option.bus.scheduled_sec}:${option.bus_stop_variant ?? ''}`;
 }
 
 function optionChronologicalSec(option: TransferOption): number {
@@ -206,9 +222,14 @@ function chooseBestTransferForFirstRide(options: TransferOption[]): TransferOpti
 function getChronologicalUniqueOptions(options: TransferOption[]): TransferOption[] {
   const valid = options.filter((option) => isChronologicallyValid(option));
 
+  // Grupuj po kluczu pociąg + autobus + wariant przystanku.
+  // Dzięki temu różne połączenia autobusowe dla tego samego pociągu WKD
+  // są wyświetlane jako osobne opcje na liście rekomendacji.
+  // Prawdziwe duplikaty (ten sam pociąg i ten sam kurs autobusu) są scalane
+  // i wybierany jest najlepszy wariant z grupy.
   const grouped = new Map<string, TransferOption[]>();
   for (const option of valid) {
-    const key = getFirstRideKey(option);
+    const key = getOptionDedupeKey(option);
     const curr = grouped.get(key) ?? [];
     curr.push(option);
     grouped.set(key, curr);
@@ -216,14 +237,19 @@ function getChronologicalUniqueOptions(options: TransferOption[]): TransferOptio
 
   return [...grouped.values()]
     .map((group) => chooseBestTransferForFirstRide(group))
-    .sort((a, b) => optionChronologicalSec(a) - optionChronologicalSec(b));
+    .sort((a, b) => {
+      const trainCmp = optionChronologicalSec(a) - optionChronologicalSec(b);
+      if (trainCmp !== 0) return trainCmp;
+      // Jeśli ten sam pociąg, sortuj wg odjazdu autobusu
+      return departureSec(a.bus) - departureSec(b.bus);
+    });
 }
 
 function isChronologicallyValid(option: TransferOption): boolean {
   const trainDeparture = departureSec(option.train);
   const transferArrival = getTransferStationArrivalTime(option);
 
-  // Odfiltruj błędne warianty, gdzie „przyjazd do przesiadki” jest przed
+  // Odfiltruj błędne warianty, gdzie „przyjazd do przesiadki" jest przed
   // odjazdem pociągu z pierwszej stacji (najczęściej oznacza zły kierunek).
   return transferArrival >= trainDeparture;
 }
