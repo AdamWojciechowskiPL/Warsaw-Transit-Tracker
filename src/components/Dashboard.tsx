@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api } from '../api';
-import { RecommendationResult, TransferOption, RouteProfile, Departure } from '../types';
+import { RecommendationResult, TransferOption, RouteProfile, Departure, TripDetails } from '../types';
 import { secToHHMM, formatDelay, formatBuffer, riskColor, riskLabel } from '../utils/time';
 import { RefreshCw, AlertTriangle, Settings, Activity, MapPin } from 'lucide-react';
 
@@ -21,6 +21,8 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   
   // Tryb live
   const [isLiveMode, setIsLiveMode] = useState(false);
+  const [tripDetails, setTripDetails] = useState<TripDetails | null>(null);
+  const [tripLoading, setTripLoading] = useState(false);
 
   const fetchRecommendations = useCallback(async () => {
     if (!activeProfile) return;
@@ -69,6 +71,34 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       }
     }
   }, [result, isLiveMode, selectedOptionId]);
+
+
+  useEffect(() => {
+    const tripId = (result?.options ?? []).find((o) => o.id === selectedOptionId)?.train.trip_id ?? null;
+
+    if (!isLiveMode || !tripId) {
+      setTripDetails(null);
+      setTripLoading(false);
+      return;
+    }
+
+    let isCancelled = false;
+    setTripLoading(true);
+    api.getTripDetails(tripId)
+      .then((data) => {
+        if (!isCancelled) setTripDetails(data.trip ?? null);
+      })
+      .catch(() => {
+        if (!isCancelled) setTripDetails(null);
+      })
+      .finally(() => {
+        if (!isCancelled) setTripLoading(false);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [isLiveMode, selectedOptionId, result]);
 
   if (!activeProfile) {
     return (
@@ -148,6 +178,8 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
           option={selectedOption} 
           transferChoices={transferChoices}
           onSwitchAlternative={(id) => setSelectedOptionId(id)}
+          tripDetails={tripDetails}
+          tripLoading={tripLoading}
         />
       ) : (
         <>
@@ -392,7 +424,7 @@ function BestOptionCard({ option, onStartLive }: { option: TransferOption; onSta
   );
 }
 
-function LiveGuidanceView({ option, transferChoices, onSwitchAlternative }: { option: TransferOption; transferChoices: TransferOption[]; onSwitchAlternative: (id: string) => void }) {
+function LiveGuidanceView({ option, transferChoices, onSwitchAlternative, tripDetails, tripLoading }: { option: TransferOption; transferChoices: TransferOption[]; onSwitchAlternative: (id: string) => void; tripDetails: TripDetails | null; tripLoading: boolean }) {
   const trainDepartureSec = departureSec(option.train);
   const transferArrivalSec = getTransferStationArrivalTime(option);
   const busDepartureSec = departureSec(option.bus);
@@ -470,6 +502,34 @@ function LiveGuidanceView({ option, transferChoices, onSwitchAlternative }: { op
             </div>
           </div>
         </div>
+      </div>
+
+      <div style={styles.liveTripPanel}>
+        <div style={styles.liveTripHeader}>
+          <MapPin size={16} /> Przebieg kursu i opóźnienia po trasie
+        </div>
+        {tripLoading && <div style={styles.liveTripMuted}>Ładowanie przebiegu trasy…</div>}
+        {!tripLoading && !tripDetails && (
+          <div style={styles.liveTripMuted}>Brak szczegółów trasy dla tego kursu.</div>
+        )}
+        {!tripLoading && tripDetails && (
+          <>
+            <div style={styles.liveTripMeta}>
+              Punkty geometrii: <strong>{tripDetails.shape.coordinates.length}</strong> •
+              Przystanki: <strong>{tripDetails.stops.length}</strong>
+            </div>
+            <div style={styles.tripStopsList}>
+              {tripDetails.stops.slice(0, 8).map((stop) => (
+                <div key={`${stop.stop_id}-${stop.seq}`} style={styles.tripStopItem}>
+                  <span style={styles.tripStopName}>{stop.stop_name}</span>
+                  <span style={styles.tripStopTime}>
+                    {secToHHMM(stop.estimated_live_sec ?? stop.scheduled_sec)} {formatDelay(stop.delay_sec)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       <div style={styles.liveMonitorInfo}>
@@ -662,6 +722,50 @@ const styles: Record<string, React.CSSProperties> = {
   },
   liveBuffer: { marginTop: 8, fontWeight: 700, fontSize: 15 },
   liveAlternatives: { marginTop: 24, paddingTop: 16, borderTop: '1px solid #e5e7eb' },
+  liveTripPanel: {
+    marginTop: 14,
+    border: '1px solid #dbeafe',
+    background: '#eff6ff',
+    borderRadius: 10,
+    padding: 12,
+  },
+  liveTripHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    fontWeight: 700,
+    color: '#1e40af',
+    marginBottom: 8,
+  },
+  liveTripMeta: {
+    fontSize: 13,
+    color: '#1f2937',
+    marginBottom: 8,
+  },
+  liveTripMuted: {
+    fontSize: 13,
+    color: '#64748b',
+  },
+  tripStopsList: {
+    display: 'grid',
+    gap: 6,
+  },
+  tripStopItem: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: 13,
+    color: '#1f2937',
+    padding: '6px 8px',
+    background: 'white',
+    borderRadius: 6,
+  },
+  tripStopName: {
+    fontWeight: 600,
+    marginRight: 12,
+  },
+  tripStopTime: {
+    color: '#334155',
+  },
   liveMonitorInfo: {
     marginTop: 16,
     padding: '10px 12px',

@@ -156,6 +156,23 @@ export const handler: Handler = async (event: HandlerEvent, context: HandlerCont
       }
     }
 
+
+    // --- GET /route/trip-details ---
+    if (method === "GET" && path === "/route/trip-details") {
+      const tripId = event.queryStringParameters?.trip_id;
+      if (!tripId) return json(400, { error: "trip_id required" });
+
+      const { CzynaczasClient } = await import("./lib/czynaczas");
+      const client = new CzynaczasClient();
+      try {
+        const trip = await client.getTripDetails(tripId);
+        if (!trip) return json(404, { error: "Trip not found" });
+        return json(200, { trip });
+      } catch (err: any) {
+        console.error('[API] Trip details error:', err);
+        return json(502, { error: err.message || "Trip details unavailable" });
+      }
+    }
     // --- GET /debug/timetable (dev only) ---
     if (method === "GET" && path === "/debug/timetable") {
       const stopId = event.queryStringParameters?.stop_id;
