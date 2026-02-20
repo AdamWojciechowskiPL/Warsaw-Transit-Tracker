@@ -89,19 +89,28 @@ export class RecommendationEngine {
     const trainCandidates = this.buildTrainCandidates(trainBoardDepartures, trainTransferDepartures, trainTransferStopId);
     console.log(`[RecEngine] Built ${trainCandidates.length} train candidates`);
 
-    // Pobierz dane ZTM dla każdego stop_id
+    // Pobierz dane ZTM dla każdego stop_id równolegle, z wbudowanym zabezpieczeniem logów
     const busDataByStop: Record<string, Departure[]> = {};
-    for (const stopId of busStopIds) {
+    console.log(`[RecEngine] Entering ZTM fetch phase for stops: ${busStopIds.join(', ')}`);
+    
+    // Zapobiega timeoutowi całości z winy ZTM poprzez zrównoleglenie i dodatkowe logi
+    const busPromises = busStopIds.map(async (stopId) => {
+      console.log(`[RecEngine] ---> Requesting ZTM for stop ${stopId}...`);
       try {
-        console.log(`[RecEngine] Fetching ZTM for stop ${stopId}`);
         const deps = await this.client.getDepartures(stopId, 20);
-        busDataByStop[stopId] = deps;
-        console.log(`[RecEngine] Fetched ${deps.length} ZTM departures for ${stopId}`);
-        console.log(`[RecEngine] ZTM ${stopId} sample: ${this.describeDepartureWindow(deps)}`);
+        console.log(`[RecEngine] <--- ZTM ${stopId} fetched ${deps.length} departures. Sample: ${this.describeDepartureWindow(deps)}`);
+        return { stopId, deps };
       } catch (e) {
-        console.error(`[RecEngine] ZTM fetch error for ${stopId}:`, e);
-        busDataByStop[stopId] = [];
+        console.error(`[RecEngine] <--- ZTM fetch error for ${stopId}:`, e);
         ztmStatus = "unavailable";
+        return { stopId, deps: [] };
+      }
+    });
+
+    const busResults = await Promise.allSettled(busPromises);
+    for (const res of busResults) {
+      if (res.status === 'fulfilled') {
+        busDataByStop[res.value.stopId] = res.value.deps;
       }
     }
 
@@ -138,13 +147,11 @@ export class RecommendationEngine {
       if (d.trip_id) byTripId.set(d.trip_id, d);
     }
 
-    // Filtrujemy odjazdy z przystanku początkowego tylko do tych,
-    // które faktycznie pojawiają się na przystanku przesiadkowym (odpowiedni kierunek).
     let filteredBoardDepartures = boardDepartures;
     if (transferStopId && byTripId.size > 0) {
       filteredBoardDepartures = boardDepartures.filter(board => {
-        if (!board.trip_id) return true; // Zostawiamy te bez ID, by nie tracić danych gdy brakuje trip_id
-        return byTripId.has(board.trip_id); // Pociąg musi pojawić się na stacji docelowej
+        if (!board.trip_id) return true; 
+        return byTripId.has(board.trip_id); 
       });
       console.log(`[RecEngine] Filtered WKD departures by direction: ${boardDepartures.length} -> ${filteredBoardDepartures.length}`);
       console.log(`[RecEngine] Direction filter matched trip_id count: ${byTripId.size}`);
@@ -184,7 +191,6 @@ export class RecommendationEngine {
     const stopIds = new Set<string>();
 
     if (busSegment.stop_variants) {
-      // Zbierz wszystkie stop_ids z wariantów
       for (const [_line, variants] of Object.entries(busSegment.stop_variants as StopVariantConfig)) {
         for (const v of variants) {
           stopIds.add(v.stop_id);
@@ -215,53 +221,55 @@ export class RecommendationEngine {
       risk: { LOW: 0, MED: 0, HIGH: 0 }
     };
 
-    // Dla każdego odjazdu pociągu (max 8 najbliższych po filtracji)
+    // Filtrujemy na wejściu (wcześniej nie było i braliśmy historyczne / z innej daty jako pierwsze!)
+    // Sort train candidates chronologically by transfer time
+    trainCandidates.sort((a, b) => a.transfer_time_sec - b.transfer_time_sec);
     const trainTop = trainCandidates.slice(0, 8);
+    
     stats.trainCandidatesConsidered = trainTop.length;
     console.log(`[RecEngine] Evaluating top train candidates: ${trainTop.length}/${trainCandidates.length}`);
 
     for (const cand of trainTop) {
       const trainTransferTime = cand.transfer_time_sec;
-      console.log(`[RecEngine] Train candidate ${cand.board.route_id ?? '-'} trip=${cand.board.trip_id ?? 'n/a'} transfer_time=${trainTransferTime}`);
+      console.log(`[RecEngine] Train candidate ${cand.board.route_id ?? '-'} trip=${cand.board.trip_id ?? 'n/a'} transfer_time=${trainTransferTime} (${this.toIsoTime(trainTransferTime)})`);
 
-      // Dla każdej linii autobusowej
       for (const busLine of allowedBusLines) {
-        // Znajdź warianty przystanków dla tej linii
         const variants = this.getVariantsForLine(busSegment, busLine);
 
         for (const { stopId, variant } of variants) {
           stats.variantChecks += 1;
-          // Czas dojścia (w sekundach)
           const walkTimeMin = this.resolveWalkTimeMinutes(config.walk_times, busLine, variant);
           const walkTimeSec = walkTimeMin * 60;
 
           const readySec = trainTransferTime + config.exit_buffer_sec + walkTimeSec;
 
-          // Znajdź pierwszy autobus po readySec
           const busDeps = (busDataByStop[stopId] || [])
             .filter(d => d.route_id === busLine);
 
+          // Find first bus after readySec
           const busDep = busDeps.find(d => {
             const busTime = d.live_sec ?? d.scheduled_sec;
+            if (readySec > 80000 && busTime < 10000) return true; // crossed midnight handling
             return busTime >= readySec;
           });
 
           if (!busDep) {
             stats.missingBusDepartures += 1;
-            console.log(`[RecEngine] No bus match: line=${busLine}, variant=${variant ?? '-'}, stop=${stopId}, ready_sec=${readySec}, checked_departures=${busDeps.length}`);
+            console.log(`[RecEngine] No bus match: line=${busLine}, variant=${variant ?? '-'}, stop=${stopId}, ready_sec=${readySec} (${this.toIsoTime(readySec)}), checked_departures=${busDeps.length}`);
             continue;
           }
 
           const busTime = busDep.live_sec ?? busDep.scheduled_sec;
-          const bufferSec = busTime - readySec;
+          let bufferSec = busTime - readySec;
+          if (readySec > 80000 && busTime < 10000) {
+              bufferSec = (busTime + 86400) - readySec;
+          }
 
-          // Ostrzeżenia
           const warnings: string[] = [];
           warnings.push(...cand.warnings);
           if (!cand.board.live_sec) warnings.push('Brak danych live WKD – większe ryzyko');
           if (!busDep.live_sec) warnings.push(`Brak danych live ZTM dla linii ${busLine}`);
 
-          // Ryzyko
           let risk: "LOW" | "MED" | "HIGH";
           if (bufferSec < config.min_transfer_buffer_sec) {
             risk = "HIGH";
@@ -270,11 +278,9 @@ export class RecommendationEngine {
           } else {
             risk = "LOW";
           }
-          // Kara za brak live
           if (!cand.board.live_sec && risk === "LOW") risk = "MED";
           stats.risk[risk] += 1;
 
-          // Score: wyższy = lepszy (preferuj duży bufor, karz brak live i wysokie ryzyko)
           let score = bufferSec;
           if (!cand.board.live_sec) score -= 120;
           if (!busDep.live_sec) score -= 60;
@@ -303,7 +309,6 @@ export class RecommendationEngine {
       }
     }
 
-    // Sortuj: najlepszy score (wyższy = lepszy)
     options.sort((a, b) => b.score - a.score);
 
     console.log(`[RecEngine] Option diagnostics: variant_checks=${stats.variantChecks}, missing_bus_matches=${stats.missingBusDepartures}, risk_LOW=${stats.risk.LOW}, risk_MED=${stats.risk.MED}, risk_HIGH=${stats.risk.HIGH}`);
@@ -325,7 +330,10 @@ export class RecommendationEngine {
   }
 
   private toIsoTime(sec: number): string {
-    return new Date(sec * 1000).toISOString();
+    const hours = Math.floor(sec / 3600) % 24;
+    const minutes = Math.floor((sec % 3600) / 60);
+    const seconds = Math.floor(sec % 60);
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   }
 
   private resolveWalkTimeMinutes(
@@ -333,7 +341,6 @@ export class RecommendationEngine {
     busLine: string,
     variant: string | null
   ): number {
-    // Obsługujemy oba style kluczy: "401_A" oraz "401A".
     if (variant) {
       const k1 = `${busLine}_${variant}`;
       const k2 = `${busLine}${variant}`;
@@ -354,7 +361,6 @@ export class RecommendationEngine {
         return sv[busLine].map(v => ({ stopId: v.stop_id, variant: v.variant }));
       }
     }
-    // Fallback: użyj from_stop_id segmentu
     if (busSegment.from_stop_id) {
       return [{ stopId: busSegment.from_stop_id, variant: null }];
     }
