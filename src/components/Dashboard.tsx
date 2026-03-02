@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Activity, AlertTriangle, Clock3, MapPin, RefreshCw, Settings } from 'lucide-react';
+import { CircleMarker, MapContainer, Polyline, Popup, TileLayer } from 'react-leaflet';
 import { api } from '../api';
 import { Departure, RecommendationResult, RouteProfile, TransferOption, TripDetails, TripStop } from '../types';
 import { formatBuffer, formatDelay, riskColor, riskLabel, secToHHMM } from '../utils/time';
 
 const AUTO_REFRESH_INTERVAL = 25_000;
 const PAST_WINDOW_SEC = 30 * 60;
+const DEFAULT_MAP_CENTER: [number, number] = [52.2297, 21.0122];
 
 interface Props {
   activeProfile: RouteProfile | null;
@@ -21,6 +23,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   const [selectedDepartureKey, setSelectedDepartureKey] = useState<string | null>(null);
   const [tripDetails, setTripDetails] = useState<TripDetails | null>(null);
   const [tripLoading, setTripLoading] = useState(false);
+  const [busTripsById, setBusTripsById] = useState<Record<string, TripDetails | null>>({});
 
   const fetchRecommendations = useCallback(async () => {
     if (!activeProfile) return;
@@ -110,6 +113,37 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     };
   }, [selectedDeparture?.representative.train.trip_id]);
 
+  useEffect(() => {
+    const busTripIds = Array.from(
+      new Set((selectedDeparture?.options ?? []).map((option) => option.bus.trip_id).filter((id): id is string => Boolean(id))),
+    );
+
+    if (busTripIds.length === 0) {
+      setBusTripsById({});
+      return;
+    }
+
+    let cancelled = false;
+
+    Promise.all(
+      busTripIds.map(async (tripId) => {
+        try {
+          const data = await api.getTripDetails(tripId);
+          return [tripId, data.trip ?? null] as const;
+        } catch {
+          return [tripId, null] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      setBusTripsById(Object.fromEntries(entries));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDeparture]);
+
   if (!activeProfile) {
     return (
       <div style={styles.emptyState}>
@@ -169,6 +203,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
               options={selectedDeparture.options}
               tripDetails={tripDetails}
               tripLoading={tripLoading}
+              busTripsById={busTripsById}
             />
           ) : (
             <div style={styles.emptyCard}>Wybierz odjazd, aby zobaczyć szczegóły trasy i przesiadek.</div>
@@ -208,13 +243,19 @@ function DepartureDetailsPanel({
   options,
   tripDetails,
   tripLoading,
+  busTripsById,
 }: {
   representative: TransferOption;
   options: TransferOption[];
   tripDetails: TripDetails | null;
   tripLoading: boolean;
+  busTripsById: Record<string, TripDetails | null>;
 }) {
   const currentPositionLabel = getCurrentVehiclePositionLabel(representative, tripDetails);
+  const transferStopId = representative.train_transfer?.stop_id;
+  const trainStopsToTransfer = getStopsUntilTransfer(tripDetails, transferStopId);
+
+  const mapData = buildMapData(representative, tripDetails, options, busTripsById);
 
   return (
     <div style={styles.detailsPanel}>
@@ -226,7 +267,7 @@ function DepartureDetailsPanel({
           <div>
             <div style={styles.infoLabel}>WKD</div>
             <strong>{representative.train.route_id} • {representative.train.headsign}</strong>
-            <div style={styles.infoSub}>Odjazd: {secToHHMM(departureSec(representative.train))} {formatDelay(representative.train.delay_sec)}</div>
+            <div style={styles.infoSub}>Odjazd: {formatPlannedWithDelay(representative.train.scheduled_sec, representative.train.delay_sec)}</div>
           </div>
         </div>
 
@@ -241,12 +282,17 @@ function DepartureDetailsPanel({
       </div>
 
       <div style={styles.subsection}>
-        <h4 style={styles.subTitle}><MapPin size={14} /> Cała trasa kursu i rozkład</h4>
-        {tripLoading && <p style={styles.muted}>Ładowanie pełnej trasy kursu…</p>}
+        <h4 style={styles.subTitle}><MapPin size={14} /> Mapa pojazdów (OpenStreetMap)</h4>
+        <VehicleMap mapData={mapData} />
+      </div>
+
+      <div style={styles.subsection}>
+        <h4 style={styles.subTitle}><MapPin size={14} /> Rozkład WKD do planowanej przesiadki</h4>
+        {tripLoading && <p style={styles.muted}>Ładowanie trasy WKD…</p>}
         {!tripLoading && !tripDetails && <p style={styles.muted}>Brak szczegółów trasy dla tego kursu.</p>}
         {!tripLoading && tripDetails && (
           <div style={styles.stopsList}>
-            {tripDetails.stops.map((stop) => (
+            {trainStopsToTransfer.map((stop) => (
               <StopRow key={`${stop.stop_id}-${stop.seq}`} stop={stop} />
             ))}
           </div>
@@ -258,6 +304,10 @@ function DepartureDetailsPanel({
         <div style={styles.transferList}>
           {options.map((option) => {
             const risk = riskColor(option.risk);
+            const busTrip = option.bus.trip_id ? busTripsById[option.bus.trip_id] : null;
+            const boardingStop = busTrip ? busTrip.stops.find((stop) => stop.stop_id === option.bus.stop_id) : null;
+            const busStopsFromBoarding = busTrip ? getStopsFromBoarding(busTrip, option.bus.stop_id) : [];
+
             return (
               <div key={option.id} style={{ ...styles.transferRow, borderLeftColor: risk }}>
                 <div style={styles.rowBetween}>
@@ -266,7 +316,15 @@ function DepartureDetailsPanel({
                 </div>
                 <div style={styles.metaRow}>Kierunek: {option.bus.headsign}</div>
                 <div style={styles.metaRow}>Bufor: {formatBuffer(option.buffer_sec)} • Dojście: {Math.round(option.walk_sec / 60)} min</div>
-                <div style={styles.metaRow}>Live: {formatDelay(option.bus.delay_sec)} {option.bus.live_sec ? '(tracking aktywny)' : '(brak live)'} </div>
+                <div style={styles.metaRow}>Odjazd (plan + opóźnienie): {formatPlannedWithDelay(option.bus.scheduled_sec, option.bus.delay_sec)}</div>
+                <div style={styles.metaRow}>Przystanek planowanego odjazdu na przesiadce: {boardingStop?.stop_name ?? option.bus.stop_id}</div>
+                {busStopsFromBoarding.length > 0 && (
+                  <div style={styles.innerStopsList}>
+                    {busStopsFromBoarding.map((stop) => (
+                      <StopRow key={`${option.id}-${stop.stop_id}-${stop.seq}`} stop={stop} compact />
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -276,18 +334,157 @@ function DepartureDetailsPanel({
   );
 }
 
-function StopRow({ stop }: { stop: TripStop }) {
+function VehicleMap({ mapData }: { mapData: MapData }) {
   return (
-    <div style={styles.stopRow}>
+    <div style={styles.mapWrap}>
+      <MapContainer center={mapData.center} zoom={12} style={styles.mapCanvas} scrollWheelZoom>
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        />
+
+        {mapData.trainPath.length > 1 && <Polyline positions={mapData.trainPath} pathOptions={{ color: '#2563eb', weight: 4 }} />}
+        {mapData.transferPaths.map((path) => (
+          <Polyline key={path.id} positions={path.points} pathOptions={{ color: '#16a34a', weight: 3, dashArray: '6 6' }} />
+        ))}
+
+        {mapData.markers.map((marker) => (
+          <CircleMarker key={marker.id} center={marker.position} radius={7} pathOptions={{ color: marker.color, fillColor: marker.color, fillOpacity: 0.8 }}>
+            <Popup>{marker.label}</Popup>
+          </CircleMarker>
+        ))}
+      </MapContainer>
+    </div>
+  );
+}
+
+function StopRow({ stop, compact = false }: { stop: TripStop; compact?: boolean }) {
+  return (
+    <div style={{ ...styles.stopRow, padding: compact ? 8 : 10 }}>
       <div>
         <strong>{stop.seq}. {stop.stop_name}</strong>
       </div>
       <div style={styles.stopTimes}>
-        <span>Plan: {secToHHMM(stop.scheduled_sec)}</span>
-        <span>Live: {secToHHMM(stop.estimated_live_sec ?? stop.scheduled_sec)} {formatDelay(stop.delay_sec)}</span>
+        <span>{formatPlannedWithDelay(stop.scheduled_sec, stop.delay_sec)}</span>
       </div>
     </div>
   );
+}
+
+function formatPlannedWithDelay(scheduledSec: number, delaySec: number | null): string {
+  const delay = formatDelay(delaySec);
+  if (!delay || delay === 'na czas') return `${secToHHMM(scheduledSec)} (plan)`;
+  return `${secToHHMM(scheduledSec)} (${delay})`;
+}
+
+function getStopsUntilTransfer(tripDetails: TripDetails | null, transferStopId?: string): TripStop[] {
+  if (!tripDetails) return [];
+  if (!transferStopId) return tripDetails.stops;
+
+  const transferStop = tripDetails.stops.find((stop) => stop.stop_id === transferStopId);
+  if (!transferStop) return tripDetails.stops;
+
+  return tripDetails.stops.filter((stop) => stop.seq <= transferStop.seq);
+}
+
+function getStopsFromBoarding(tripDetails: TripDetails, boardingStopId: string): TripStop[] {
+  const sorted = [...tripDetails.stops].sort((a, b) => a.seq - b.seq);
+  const boarding = sorted.find((stop) => stop.stop_id === boardingStopId);
+  if (!boarding) return sorted;
+  return sorted.filter((stop) => stop.seq >= boarding.seq);
+}
+
+interface MapData {
+  center: [number, number];
+  trainPath: [number, number][];
+  transferPaths: Array<{ id: string; points: [number, number][] }>;
+  markers: Array<{ id: string; position: [number, number]; label: string; color: string }>;
+}
+
+function buildMapData(
+  representative: TransferOption,
+  trainTrip: TripDetails | null,
+  options: TransferOption[],
+  busTripsById: Record<string, TripDetails | null>,
+): MapData {
+  const markers: MapData['markers'] = [];
+  const trainPath = tripShapeToLatLng(trainTrip);
+  const trainPosition = trainTrip ? computeVehiclePosition(trainTrip) : null;
+
+  if (trainPosition) {
+    markers.push({
+      id: 'train-pos',
+      position: trainPosition,
+      label: `WKD ${representative.train.route_id} • ${representative.train.headsign}`,
+      color: '#2563eb',
+    });
+  }
+
+  const transferPaths: MapData['transferPaths'] = [];
+  options.forEach((option) => {
+    if (!option.bus.trip_id) return;
+    const busTrip = busTripsById[option.bus.trip_id];
+    if (!busTrip) return;
+
+    const path = tripShapeToLatLng(busTrip);
+    if (path.length > 1) {
+      transferPaths.push({ id: option.id, points: path });
+    }
+
+    const busPosition = computeVehiclePosition(busTrip);
+    if (busPosition) {
+      markers.push({
+        id: `bus-pos-${option.id}`,
+        position: busPosition,
+        label: `Przesiadka: ${option.bus.route_id} • ${option.bus.headsign}`,
+        color: '#16a34a',
+      });
+    }
+  });
+
+  const allPoints = [...trainPath, ...transferPaths.flatMap((path) => path.points), ...markers.map((m) => m.position)];
+  const center = allPoints[0] ?? DEFAULT_MAP_CENTER;
+
+  return { center, trainPath, transferPaths, markers };
+}
+
+function computeVehiclePosition(trip: TripDetails): [number, number] | null {
+  const sortedStops = [...trip.stops].sort((a, b) => a.seq - b.seq);
+  if (sortedStops.length === 0) return null;
+
+  const now = nowSecLocal();
+  const nextStop = sortedStops.find((stop) => (stop.estimated_live_sec ?? stop.scheduled_sec) >= now);
+
+  if (!nextStop) {
+    const last = sortedStops[sortedStops.length - 1];
+    return [last.lat, last.lon];
+  }
+
+  if (nextStop.seq === sortedStops[0].seq) {
+    return [nextStop.lat, nextStop.lon];
+  }
+
+  const prevStop = sortedStops.find((stop) => stop.seq === nextStop.seq - 1);
+  if (!prevStop) return [nextStop.lat, nextStop.lon];
+
+  const prevT = prevStop.estimated_live_sec ?? prevStop.scheduled_sec;
+  const nextT = nextStop.estimated_live_sec ?? nextStop.scheduled_sec;
+  const progress = nextT > prevT ? Math.min(1, Math.max(0, (now - prevT) / (nextT - prevT))) : 0;
+
+  const lat = prevStop.lat + (nextStop.lat - prevStop.lat) * progress;
+  const lon = prevStop.lon + (nextStop.lon - prevStop.lon) * progress;
+  return [lat, lon];
+}
+
+function tripShapeToLatLng(trip: TripDetails | null): [number, number][] {
+  if (!trip) return [];
+  if (trip.shape.coordinates.length > 0) {
+    return trip.shape.coordinates.map(([lon, lat]) => [lat, lon]);
+  }
+
+  return [...trip.stops]
+    .sort((a, b) => a.seq - b.seq)
+    .map((stop) => [stop.lat, stop.lon]);
 }
 
 function getCurrentVehiclePositionLabel(option: TransferOption, tripDetails: TripDetails | null): string {
@@ -379,11 +576,14 @@ const styles: Record<string, React.CSSProperties> = {
   subsection: { marginTop: 18 },
   subTitle: { margin: '0 0 10px', display: 'flex', alignItems: 'center', gap: 6, color: '#0f172a' },
   muted: { color: '#64748b', margin: 0 },
-  stopsList: { display: 'grid', gap: 8, maxHeight: 340, overflowY: 'auto', paddingRight: 4 },
+  stopsList: { display: 'grid', gap: 8, maxHeight: 300, overflowY: 'auto', paddingRight: 4 },
+  innerStopsList: { display: 'grid', gap: 6, marginTop: 8, maxHeight: 220, overflowY: 'auto' },
   stopRow: { border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, display: 'flex', justifyContent: 'space-between', gap: 10 },
   stopTimes: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', color: '#334155', fontSize: 13 },
   transferList: { display: 'grid', gap: 8 },
   transferRow: { border: '1px solid #e2e8f0', borderLeft: '4px solid', borderRadius: 8, padding: 10 },
+  mapWrap: { border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' },
+  mapCanvas: { width: '100%', height: 320 },
   emptyCard: { background: 'white', border: '1px dashed #cbd5e1', borderRadius: 10, padding: 16, color: '#64748b', marginTop: 10 },
   emptyState: { textAlign: 'center', padding: '52px 0', display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center' },
   primaryBtn: { background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontWeight: 600 },
