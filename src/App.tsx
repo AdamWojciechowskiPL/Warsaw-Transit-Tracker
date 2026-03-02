@@ -168,7 +168,7 @@ const styles: Record<string, React.CSSProperties> = {
   loginPrompt: { display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 'calc(100vh - 65px)' },
   loginCard: { background: 'white', borderRadius: 16, padding: '48px 40px', boxShadow: '0 4px 24px rgba(0,0,0,0.10)', textAlign: 'center', maxWidth: 400 },
   btnLoginBig: { background: '#2563eb', color: 'white', border: 'none', borderRadius: 10, padding: '14px 32px', cursor: 'pointer', fontWeight: 700, fontSize: 17, width: '100%' },
-  content: { maxWidth: 680, margin: '0 auto', padding: '24px 16px' },
+  content: { maxWidth: 1240, margin: '0 auto', padding: '24px 16px' },
 };
 
 export default App;
