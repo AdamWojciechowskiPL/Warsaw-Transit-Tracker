@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Clock3, LocateFixed, MapPin, RefreshCw, Settings } from 'lucide-react';
+import { Activity, AlertTriangle, Clock3, MapPin, RefreshCw, Settings } from 'lucide-react';
 import { api } from '../api';
-import { Departure, RecommendationResult, RouteProfile, TransferOption, TripDetails } from '../types';
+import { Departure, RecommendationResult, RouteProfile, TransferOption, TripDetails, TripStop } from '../types';
 import { formatBuffer, formatDelay, riskColor, riskLabel, secToHHMM } from '../utils/time';
 
 const AUTO_REFRESH_INTERVAL = 25_000;
-const RECENT_DEPARTURES_WINDOW_SEC = 30 * 60;
+const PAST_WINDOW_SEC = 30 * 60;
 
 interface Props {
   activeProfile: RouteProfile | null;
@@ -15,7 +15,10 @@ interface Props {
 export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   const [result, setResult] = useState<RecommendationResult | null>(null);
   const [allOptions, setAllOptions] = useState<TransferOption[]>([]);
-  const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [selectedDepartureKey, setSelectedDepartureKey] = useState<string | null>(null);
   const [tripDetails, setTripDetails] = useState<TripDetails | null>(null);
   const [loading, setLoading] = useState(false);
   const [tripLoading, setTripLoading] = useState(false);
@@ -24,16 +27,16 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
 
   const fetchRecommendations = useCallback(async () => {
     if (!activeProfile) return;
+
     setLoading(true);
     setError(null);
     try {
-      const data = (await api.getRecommendation(activeProfile.id, 10)) as RecommendationResult;
-      const dashboardOptions = getDashboardOptions(data.options);
+      const data = await api.getRecommendation(activeProfile.id, 16) as RecommendationResult;
+      setResult(data);
       setAllOptions(data.options);
-      setResult({ ...data, options: dashboardOptions });
       setLastRefresh(new Date());
     } catch (e: any) {
-      setError(e.message || 'Nie udało się pobrać rekomendacji.');
+      setError(e.message ?? 'Nie udało się pobrać danych.');
     } finally {
       setLoading(false);
     }
@@ -45,37 +48,46 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     return () => clearInterval(interval);
   }, [fetchRecommendations]);
 
-  const visibleOptions = useMemo(() => {
+  const groupedDepartures = useMemo(() => {
+    const groups = new Map<string, TransferOption[]>();
+
+    for (const option of allOptions) {
+      const key = getFirstRideKey(option);
+      const current = groups.get(key) ?? [];
+      current.push(option);
+      groups.set(key, current);
+    }
+
     const now = nowSecLocal();
-    return (result?.options ?? [])
-      .filter((option) => departureSec(option.train) >= now - RECENT_DEPARTURES_WINDOW_SEC)
-      .sort((a, b) => departureSec(a.train) - departureSec(b.train));
-  }, [result]);
+
+    return [...groups.entries()]
+      .map(([key, options]) => ({
+        key,
+        representative: chooseRepresentativeOption(options),
+        options: sortTransfersByFeasibility(options),
+      }))
+      .filter((group) => departureSec(group.representative.train) >= now - PAST_WINDOW_SEC)
+      .sort((a, b) => departureSec(a.representative.train) - departureSec(b.representative.train));
+  }, [allOptions]);
 
   useEffect(() => {
-    if (visibleOptions.length === 0) {
-      setSelectedOptionId(null);
+    if (groupedDepartures.length === 0) {
+      setSelectedDepartureKey(null);
       return;
     }
-    const selectedStillVisible = visibleOptions.some((opt) => opt.id === selectedOptionId);
-    if (selectedStillVisible) return;
 
-    const now = nowSecLocal();
-    const nearestFuture = visibleOptions.find((opt) => departureSec(opt.train) >= now);
-    setSelectedOptionId((nearestFuture ?? visibleOptions[visibleOptions.length - 1]).id);
-  }, [visibleOptions, selectedOptionId]);
+    if (!selectedDepartureKey || !groupedDepartures.some((g) => g.key === selectedDepartureKey)) {
+      const now = nowSecLocal();
+      const firstUpcoming = groupedDepartures.find((g) => departureSec(g.representative.train) >= now);
+      setSelectedDepartureKey((firstUpcoming ?? groupedDepartures[0]).key);
+    }
+  }, [groupedDepartures, selectedDepartureKey]);
 
-  const selectedOption = visibleOptions.find((option) => option.id === selectedOptionId) ?? null;
-
-  const transferChoices = useMemo(() => {
-    if (!selectedOption) return [];
-    return sortTransfersForLive(
-      allOptions.filter((option) => getFirstRideKey(option) === getFirstRideKey(selectedOption))
-    );
-  }, [allOptions, selectedOption]);
+  const selectedDeparture = groupedDepartures.find((group) => group.key === selectedDepartureKey) ?? null;
 
   useEffect(() => {
-    const tripId = selectedOption?.train.trip_id ?? null;
+    const tripId = selectedDeparture?.representative.train.trip_id;
+
     if (!tripId) {
       setTripDetails(null);
       setTripLoading(false);
@@ -84,6 +96,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
 
     let cancelled = false;
     setTripLoading(true);
+
     api.getTripDetails(tripId)
       .then((data) => {
         if (!cancelled) setTripDetails(data.trip ?? null);
@@ -98,65 +111,70 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [selectedOption?.train.trip_id]);
+  }, [selectedDeparture?.representative.train.trip_id]);
 
   if (!activeProfile) {
     return (
       <div style={styles.emptyState}>
-        <h2>Brak aktywnej trasy</h2>
-        <p>Ustaw profil, aby zobaczyć odjazdy i monitoring przesiadek.</p>
-        <button style={styles.primaryButton} onClick={onGoToSettings}>Konfiguruj trasę</button>
+        <p style={{ fontSize: 18, color: '#64748b' }}>Brak aktywnego profilu trasy.</p>
+        <button style={styles.primaryBtn} onClick={onGoToSettings}>Skonfiguruj trasę</button>
       </div>
     );
   }
 
   return (
     <div style={styles.page}>
-      <div style={styles.pageHeader}>
+      <div style={styles.topBar}>
         <div>
           <h2 style={styles.pageTitle}>{activeProfile.name}</h2>
-          <p style={styles.subtitle}>Najbliższe odjazdy + odjazdy z ostatnich 30 minut</p>
-          {lastRefresh && <p style={styles.refreshInfo}>Aktualizacja: {lastRefresh.toLocaleTimeString('pl-PL')}</p>}
+          <p style={styles.subtitle}>Najbliższe odjazdy + odjazdy sprzed maksymalnie 30 minut.</p>
         </div>
-        <div style={styles.headerActions}>
+        <div style={styles.topActions}>
           {result && (
-            <div style={styles.statusPills}>
-              <span style={styles.statusPill}>WKD: {result.meta.live_status.wkd === 'available' ? 'live' : 'offline'}</span>
-              <span style={styles.statusPill}>ZTM: {result.meta.live_status.ztm === 'available' ? 'live' : 'offline'}</span>
+            <div style={styles.liveSources}>
+              <span>{result.meta.live_status.wkd === 'available' ? '✅' : '❌'} WKD</span>
+              <span>{result.meta.live_status.ztm === 'available' ? '✅' : '❌'} ZTM</span>
             </div>
           )}
-          <button style={styles.iconButton} onClick={fetchRecommendations} title="Odśwież" disabled={loading}>
-            <RefreshCw size={18} />
+          <button style={styles.iconBtn} onClick={fetchRecommendations} title="Odśwież" disabled={loading}>
+            <RefreshCw size={16} />
           </button>
-          <button style={styles.iconButton} onClick={onGoToSettings} title="Ustawienia">
-            <Settings size={18} />
+          <button style={styles.iconBtn} onClick={onGoToSettings} title="Ustawienia trasy">
+            <Settings size={16} />
           </button>
         </div>
       </div>
 
-      {error && <div style={styles.error}><AlertTriangle size={16} />{error}</div>}
+      {lastRefresh && <p style={styles.refreshText}>Ostatnie odświeżenie: {lastRefresh.toLocaleTimeString('pl-PL')}</p>}
+      {error && <div style={styles.errorBanner}><AlertTriangle size={14} /> {error}</div>}
 
-      <div style={styles.grid}>
-        <section style={styles.departureListSection}>
+      <div style={styles.layout}>
+        <section style={styles.leftPane}>
           <h3 style={styles.sectionTitle}>Odjazdy z przystanku początkowego</h3>
-          {visibleOptions.length === 0 && !loading && <p style={styles.muted}>Brak odjazdów w aktywnym oknie czasowym.</p>}
-          <div style={styles.departureList}>
-            {visibleOptions.map((option) => (
+          {groupedDepartures.length === 0 ? (
+            <div style={styles.emptyCard}>Brak odjazdów w oknie czasowym.</div>
+          ) : (
+            groupedDepartures.map((group) => (
               <DepartureCard
-                key={option.id}
-                option={option}
-                selected={option.id === selectedOption?.id}
-                onClick={() => setSelectedOptionId(option.id)}
+                key={group.key}
+                option={group.representative}
+                selected={group.key === selectedDepartureKey}
+                onClick={() => setSelectedDepartureKey(group.key)}
               />
-            ))}
-          </div>
+            ))
+          )}
         </section>
 
-        <section style={styles.detailSection}>
-          {!selectedOption ? (
-            <p style={styles.muted}>Wybierz odjazd, aby zobaczyć szczegóły trasy i przesiadek.</p>
+        <section style={styles.rightPane}>
+          {selectedDeparture ? (
+            <DepartureDetailsPanel
+              representative={selectedDeparture.representative}
+              options={selectedDeparture.options}
+              tripDetails={tripDetails}
+              tripLoading={tripLoading}
+            />
           ) : (
-            <DepartureDetails option={selectedOption} transferChoices={transferChoices} tripDetails={tripDetails} tripLoading={tripLoading} />
+            <div style={styles.emptyCard}>Wybierz odjazd, aby zobaczyć szczegóły trasy i przesiadek.</div>
           )}
         </section>
       </div>
@@ -164,147 +182,174 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   );
 }
 
-function DepartureCard({ option, selected, onClick }: { option: TransferOption; selected: boolean; onClick: () => void; }) {
-  const now = nowSecLocal();
-  const trainDeparture = departureSec(option.train);
-  const trainStatus = trainDeparture >= now ? 'Nadchodzi' : 'Odbył się';
-  const trainStatusColor = trainDeparture >= now ? '#0369a1' : '#6b7280';
+function DepartureCard({ option, selected, onClick }: { option: TransferOption; selected: boolean; onClick: () => void }) {
+  const dep = departureSec(option.train);
+  const diffMin = Math.round((dep - nowSecLocal()) / 60);
+  const stateLabel = diffMin < 0 ? `${Math.abs(diffMin)} min temu` : `za ${diffMin} min`;
 
   return (
-    <button style={{ ...styles.departureCard, ...(selected ? styles.departureCardSelected : {}) }} onClick={onClick}>
-      <div style={styles.departureTopRow}>
-        <strong>🚆 {secToHHMM(trainDeparture)}</strong>
-        <span style={{ ...styles.tag, color: trainStatusColor, borderColor: trainStatusColor }}>{trainStatus}</span>
+    <button
+      onClick={onClick}
+      style={{
+        ...styles.departureCard,
+        borderColor: selected ? '#2563eb' : '#dbe2ea',
+        background: selected ? '#eff6ff' : 'white',
+      }}
+    >
+      <div style={styles.rowBetween}>
+        <strong>🚂 {secToHHMM(dep)}</strong>
+        <span style={{ color: diffMin < 0 ? '#b45309' : '#166534', fontWeight: 700 }}>{stateLabel}</span>
       </div>
-      <div style={styles.departureMeta}>WKD {option.train.route_id} → {option.train.headsign}</div>
-      <div style={styles.departureMeta}>Przesiadka: 🚌 {option.bus.route_id} {secToHHMM(departureSec(option.bus))}</div>
-      <div style={styles.departureBottom}>
-        <span style={{ color: riskColor(option.risk), fontWeight: 700 }}>{riskLabel(option.risk)}</span>
-        <span>Bufor: {formatBuffer(option.buffer_sec)}</span>
-      </div>
+      <div style={styles.metaRow}>Kierunek: {option.train.headsign}</div>
+      <div style={styles.metaRow}>Linia przesiadkowa (najlepsza): {option.bus.route_id} o {secToHHMM(departureSec(option.bus))}</div>
     </button>
   );
 }
 
-function DepartureDetails({ option, transferChoices, tripDetails, tripLoading }: {
-  option: TransferOption;
-  transferChoices: TransferOption[];
+function DepartureDetailsPanel({
+  representative,
+  options,
+  tripDetails,
+  tripLoading,
+}: {
+  representative: TransferOption;
+  options: TransferOption[];
   tripDetails: TripDetails | null;
   tripLoading: boolean;
 }) {
-  const now = nowSecLocal();
-  const transferArrivalSec = getTransferStationArrivalTime(option);
-  const currentPosition = describeCurrentPosition(now, option, tripDetails);
+  const currentPositionLabel = getCurrentVehiclePositionLabel(representative, tripDetails);
 
   return (
-    <div style={styles.detailsContainer}>
-      <h3 style={styles.sectionTitle}>Szczegóły odjazdu</h3>
-      <div style={styles.timeline}>
-        <div style={styles.timelineItem}><Clock3 size={16} /> Odjazd WKD: <strong>{secToHHMM(departureSec(option.train))}</strong> {formatDelay(option.train.delay_sec)}</div>
-        <div style={styles.timelineItem}><MapPin size={16} /> Stacja przesiadki: <strong>{secToHHMM(transferArrivalSec)}</strong></div>
-        <div style={styles.timelineItem}><LocateFixed size={16} /> Aktualna pozycja: <strong>{currentPosition}</strong></div>
-        <div style={styles.timelineItem}>🚶 Dojście pieszo: <strong>{Math.floor(option.walk_sec / 60)} min</strong></div>
-        <div style={styles.timelineItem}>🚌 Odjazd autobusu: <strong>{secToHHMM(departureSec(option.bus))}</strong> {formatDelay(option.bus.delay_sec)}</div>
-      </div>
+    <div style={styles.detailsPanel}>
+      <h3 style={styles.sectionTitle}>Szczegóły odjazdu {secToHHMM(departureSec(representative.train))}</h3>
 
-      <h4 style={styles.subTitle}>Możliwości przesiadki (od najszybszej)</h4>
-      <div style={styles.transferList}>
-        {transferChoices.map((alt) => (
-          <div key={alt.id} style={styles.transferRow}>
-            <span>{secToHHMM(departureSec(alt.bus))} • linia {alt.bus.route_id}</span>
-            <span>{formatBuffer(alt.buffer_sec)} • {riskLabel(alt.risk)}</span>
-            <span style={styles.liveStatusText}>Live: {formatDelay(alt.bus.delay_sec)}</span>
+      <div style={styles.infoGrid}>
+        <div style={styles.infoBox}>
+          <Clock3 size={16} />
+          <div>
+            <div style={styles.infoLabel}>WKD</div>
+            <strong>{representative.train.route_id} • {representative.train.headsign}</strong>
+            <div style={styles.infoSub}>Odjazd: {secToHHMM(departureSec(representative.train))} {formatDelay(representative.train.delay_sec)}</div>
           </div>
-        ))}
+        </div>
+
+        <div style={styles.infoBox}>
+          <Activity size={16} />
+          <div>
+            <div style={styles.infoLabel}>Pozycja pojazdu</div>
+            <strong>{currentPositionLabel}</strong>
+            <div style={styles.infoSub}>Aktualizowane na podstawie live/schedule.</div>
+          </div>
+        </div>
       </div>
 
-      <h4 style={styles.subTitle}>Pełna trasa i rozkład</h4>
-      {tripLoading && <p style={styles.muted}>Ładowanie przebiegu pojazdu…</p>}
-      {!tripLoading && !tripDetails && <p style={styles.muted}>Brak szczegółowej geometrii kursu dla tego pojazdu.</p>}
-      {!tripLoading && tripDetails && (
-        <div style={styles.stopsList}>
-          {tripDetails.stops.map((stop) => (
-            <div key={`${stop.stop_id}-${stop.seq}`} style={styles.stopRow}>
-              <span>{stop.seq}. {stop.stop_name}</span>
-              <span>{secToHHMM(stop.estimated_live_sec ?? stop.scheduled_sec)} {formatDelay(stop.delay_sec)}</span>
-            </div>
-          ))}
+      <div style={styles.subsection}>
+        <h4 style={styles.subTitle}><MapPin size={14} /> Cała trasa kursu i rozkład</h4>
+        {tripLoading && <p style={styles.muted}>Ładowanie pełnej trasy kursu…</p>}
+        {!tripLoading && !tripDetails && <p style={styles.muted}>Brak szczegółów trasy dla tego kursu.</p>}
+        {!tripLoading && tripDetails && (
+          <div style={styles.stopsList}>
+            {tripDetails.stops.map((stop) => (
+              <StopRow key={`${stop.stop_id}-${stop.seq}`} stop={stop} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={styles.subsection}>
+        <h4 style={styles.subTitle}>Przesiadki (od najszybszej możliwej)</h4>
+        <div style={styles.transferList}>
+          {options.map((option) => {
+            const risk = riskColor(option.risk);
+            return (
+              <div key={option.id} style={{ ...styles.transferRow, borderLeftColor: risk }}>
+                <div style={styles.rowBetween}>
+                  <strong>🚌 {option.bus.route_id} • {secToHHMM(departureSec(option.bus))}</strong>
+                  <span style={{ color: risk, fontWeight: 700 }}>{riskLabel(option.risk)}</span>
+                </div>
+                <div style={styles.metaRow}>Kierunek: {option.bus.headsign}</div>
+                <div style={styles.metaRow}>Bufor: {formatBuffer(option.buffer_sec)} • Dojście: {Math.round(option.walk_sec / 60)} min</div>
+                <div style={styles.metaRow}>Live: {formatDelay(option.bus.delay_sec)} {option.bus.live_sec ? '(tracking aktywny)' : '(brak live)'} </div>
+              </div>
+            );
+          })}
         </div>
-      )}
+      </div>
     </div>
   );
+}
+
+function StopRow({ stop }: { stop: TripStop }) {
+  return (
+    <div style={styles.stopRow}>
+      <div>
+        <strong>{stop.seq}. {stop.stop_name}</strong>
+      </div>
+      <div style={styles.stopTimes}>
+        <span>Plan: {secToHHMM(stop.scheduled_sec)}</span>
+        <span>Live: {secToHHMM(stop.estimated_live_sec ?? stop.scheduled_sec)} {formatDelay(stop.delay_sec)}</span>
+      </div>
+    </div>
+  );
+}
+
+function getCurrentVehiclePositionLabel(option: TransferOption, tripDetails: TripDetails | null): string {
+  const now = nowSecLocal();
+
+  if (tripDetails && tripDetails.stops.length > 1) {
+    const sortedStops = [...tripDetails.stops].sort((a, b) => a.seq - b.seq);
+    const nextStop = sortedStops.find((stop) => (stop.estimated_live_sec ?? stop.scheduled_sec) >= now);
+
+    if (!nextStop) return 'Kurs powinien być już po ostatnim przystanku.';
+    if (nextStop.seq === sortedStops[0].seq) return `Przed odjazdem z: ${nextStop.stop_name}`;
+
+    const prevStop = sortedStops.find((stop) => stop.seq === nextStop.seq - 1);
+    if (!prevStop) return `Zbliża się do: ${nextStop.stop_name}`;
+
+    return `Między: ${prevStop.stop_name} → ${nextStop.stop_name}`;
+  }
+
+  const trainDeparture = departureSec(option.train);
+  const transferArrival = getTransferStationArrivalTime(option);
+
+  if (now < trainDeparture) return 'Na przystanku początkowym (przed odjazdem).';
+  if (now < transferArrival) return 'W trasie do punktu przesiadki.';
+
+  return 'Po dojechaniu do punktu przesiadki.';
 }
 
 function departureSec(departure: Departure): number {
   return departure.live_sec ?? departure.scheduled_sec;
 }
 
+function getTransferStationArrivalTime(option: TransferOption): number {
+  if (option.train_transfer) return departureSec(option.train_transfer);
+  if (option.train_transfer_time_sec) return option.train_transfer_time_sec;
+  return option.ready_sec - option.walk_sec - option.exit_buffer_sec;
+}
+
 function getFirstRideKey(option: TransferOption): string {
   return `${option.train.route_id}:${option.train.stop_id}:${option.train.scheduled_sec}`;
 }
 
-function getOptionDedupeKey(option: TransferOption): string {
-  return `${getFirstRideKey(option)}:${option.bus.route_id}:${option.bus.scheduled_sec}:${option.bus_stop_variant ?? ''}`;
+function chooseRepresentativeOption(options: TransferOption[]): TransferOption {
+  return sortTransfersByFeasibility(options)[0];
 }
 
-function riskScore(risk: TransferOption['risk']): number {
-  if (risk === 'LOW') return 0;
-  if (risk === 'MED') return 1;
-  return 2;
-}
-
-function chooseBestTransferForFirstRide(options: TransferOption[]): TransferOption {
+function sortTransfersByFeasibility(options: TransferOption[]): TransferOption[] {
   return [...options].sort((a, b) => {
-    const busCmp = departureSec(a.bus) - departureSec(b.bus);
-    if (busCmp !== 0) return busCmp;
+    const aReady = a.ready_sec;
+    const bReady = b.ready_sec;
 
-    const riskCmp = riskScore(a.risk) - riskScore(b.risk);
-    if (riskCmp !== 0) return riskCmp;
+    if (aReady !== bReady) return aReady - bReady;
+
+    const aBus = departureSec(a.bus);
+    const bBus = departureSec(b.bus);
+
+    if (aBus !== bBus) return aBus - bBus;
 
     return b.buffer_sec - a.buffer_sec;
-  })[0];
-}
-
-function getDashboardOptions(options: TransferOption[]): TransferOption[] {
-  const dedupedByTrainBus = new Map<string, TransferOption[]>();
-  for (const option of options) {
-    const key = getOptionDedupeKey(option);
-    const curr = dedupedByTrainBus.get(key) ?? [];
-    curr.push(option);
-    dedupedByTrainBus.set(key, curr);
-  }
-
-  const uniqueOptions = [...dedupedByTrainBus.values()].map((group) => chooseBestTransferForFirstRide(group));
-
-  const groupedByFirstRide = new Map<string, TransferOption[]>();
-  for (const option of uniqueOptions) {
-    const key = getFirstRideKey(option);
-    const curr = groupedByFirstRide.get(key) ?? [];
-    curr.push(option);
-    groupedByFirstRide.set(key, curr);
-  }
-
-  return [...groupedByFirstRide.values()]
-    .map((group) => chooseBestTransferForFirstRide(group))
-    .sort((a, b) => departureSec(a.train) - departureSec(b.train));
-}
-
-function sortTransfersForLive(options: TransferOption[]): TransferOption[] {
-  return [...options].sort((a, b) => {
-    const arrivalCmp = getTransferStationArrivalTime(a) - getTransferStationArrivalTime(b);
-    if (arrivalCmp !== 0) return arrivalCmp;
-
-    const busCmp = departureSec(a.bus) - departureSec(b.bus);
-    if (busCmp !== 0) return busCmp;
-
-    return riskScore(a.risk) - riskScore(b.risk);
   });
-}
-
-function getTransferStationArrivalTime(option: TransferOption): number {
-  if (option.train_transfer) return option.train_transfer.live_sec ?? option.train_transfer.scheduled_sec;
-  if (option.train_transfer_time_sec) return option.train_transfer_time_sec;
-  return option.ready_sec - option.walk_sec - option.exit_buffer_sec;
 }
 
 function nowSecLocal(): number {
@@ -312,78 +357,37 @@ function nowSecLocal(): number {
   return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
 }
 
-function describeCurrentPosition(nowSec: number, option: TransferOption, details: TripDetails | null): string {
-  const trainDepartureSec = departureSec(option.train);
-  const transferArrivalSec = getTransferStationArrivalTime(option);
-  const busDepartureSec = departureSec(option.bus);
-
-  if (!details) {
-    if (nowSec < trainDepartureSec) return 'przed odjazdem (stacja początkowa)';
-    if (nowSec < transferArrivalSec) return 'WKD w trasie do przesiadki';
-    if (nowSec < busDepartureSec) return 'przesiadka / przejście pieszo';
-    return 'autobus po przesiadce w trasie';
-  }
-
-  const nextStop = details.stops.find((stop) => (stop.estimated_live_sec ?? stop.scheduled_sec) >= nowSec);
-  if (!nextStop) return 'końcowy odcinek trasy';
-  return `okolice przystanku ${nextStop.stop_name}`;
-}
-
 const styles: Record<string, React.CSSProperties> = {
-  page: { display: 'flex', flexDirection: 'column', gap: 16 },
-  pageHeader: {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16,
-    background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 16,
-  },
-  pageTitle: { margin: 0, fontSize: 26 },
-  subtitle: { margin: '6px 0', color: '#475569' },
-  refreshInfo: { margin: 0, color: '#64748b', fontSize: 13 },
-  headerActions: { display: 'flex', alignItems: 'center', gap: 8 },
-  statusPills: { display: 'flex', gap: 6 },
-  statusPill: { border: '1px solid #cbd5e1', borderRadius: 999, padding: '4px 8px', fontSize: 12 },
-  iconButton: {
-    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 36, height: 36,
-    borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', cursor: 'pointer',
-  },
-  error: {
-    display: 'flex', alignItems: 'center', gap: 8, color: '#b91c1c', background: '#fee2e2',
-    border: '1px solid #fecaca', borderRadius: 10, padding: 10,
-  },
-  grid: { display: 'grid', gridTemplateColumns: 'minmax(320px, 420px) 1fr', gap: 16 },
-  departureListSection: { background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 12 },
-  detailSection: { background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 16 },
-  sectionTitle: { marginTop: 0, marginBottom: 12 },
-  departureList: { display: 'flex', flexDirection: 'column', gap: 10, maxHeight: '72vh', overflowY: 'auto' },
-  departureCard: {
-    textAlign: 'left', borderRadius: 12, border: '1px solid #e2e8f0', padding: 12, background: '#fff',
-    cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 6,
-  },
-  departureCardSelected: { borderColor: '#0f766e', boxShadow: '0 0 0 2px rgba(15,118,110,.15)' },
-  departureTopRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
-  departureMeta: { color: '#475569', fontSize: 14 },
-  departureBottom: { display: 'flex', justifyContent: 'space-between', fontSize: 14 },
-  tag: { border: '1px solid', borderRadius: 999, padding: '2px 8px', fontSize: 12, fontWeight: 600 },
-  detailsContainer: { display: 'flex', flexDirection: 'column', gap: 10 },
-  timeline: { display: 'flex', flexDirection: 'column', gap: 8, background: '#f8fafc', padding: 12, borderRadius: 10 },
-  timelineItem: { display: 'flex', gap: 8, alignItems: 'center', color: '#1e293b' },
-  subTitle: { marginBottom: 4, marginTop: 8 },
-  transferList: { display: 'flex', flexDirection: 'column', gap: 8 },
-  transferRow: {
-    display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 10, alignItems: 'center',
-    border: '1px solid #e2e8f0', borderRadius: 10, padding: 8, fontSize: 14,
-  },
-  liveStatusText: { color: '#0f766e', fontWeight: 600 },
-  stopsList: { maxHeight: 320, overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: 10 },
-  stopRow: {
-    display: 'flex', justifyContent: 'space-between', gap: 12, padding: '8px 10px',
-    borderBottom: '1px solid #f1f5f9', fontSize: 14,
-  },
-  emptyState: {
-    display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start', padding: 24,
-    borderRadius: 14, border: '1px dashed #94a3b8', background: '#fff',
-  },
-  muted: { color: '#64748b' },
-  primaryButton: {
-    background: '#0f766e', color: 'white', border: 'none', borderRadius: 8, padding: '10px 14px', cursor: 'pointer',
-  },
+  page: { paddingBottom: 32 },
+  topBar: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', marginBottom: 8 },
+  pageTitle: { margin: 0, fontSize: 28, color: '#0f172a' },
+  subtitle: { margin: '6px 0 0', color: '#475569' },
+  topActions: { display: 'flex', gap: 8, alignItems: 'center' },
+  liveSources: { display: 'flex', gap: 8, fontSize: 13, color: '#334155' },
+  iconBtn: { border: '1px solid #cbd5e1', borderRadius: 8, background: 'white', padding: 8, cursor: 'pointer', display: 'flex' },
+  refreshText: { margin: '0 0 12px', color: '#64748b', fontSize: 13 },
+  errorBanner: { display: 'flex', gap: 8, alignItems: 'center', background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', borderRadius: 8, padding: '10px 12px', marginBottom: 12 },
+  layout: { display: 'grid', gridTemplateColumns: '360px 1fr', gap: 16, alignItems: 'start' },
+  leftPane: { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12, position: 'sticky', top: 84 },
+  rightPane: { minHeight: 300 },
+  sectionTitle: { margin: 0, fontSize: 18, color: '#0f172a' },
+  departureCard: { width: '100%', textAlign: 'left', border: '1px solid', borderRadius: 10, padding: 12, marginTop: 10, cursor: 'pointer' },
+  rowBetween: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
+  metaRow: { color: '#475569', marginTop: 6, fontSize: 14 },
+  detailsPanel: { background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16 },
+  infoGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 },
+  infoBox: { display: 'flex', gap: 10, border: '1px solid #e2e8f0', borderRadius: 10, padding: 12, alignItems: 'flex-start' },
+  infoLabel: { fontSize: 12, color: '#64748b', marginBottom: 3 },
+  infoSub: { color: '#475569', marginTop: 4, fontSize: 13 },
+  subsection: { marginTop: 18 },
+  subTitle: { margin: '0 0 10px', display: 'flex', alignItems: 'center', gap: 6, color: '#0f172a' },
+  muted: { color: '#64748b', margin: 0 },
+  stopsList: { display: 'grid', gap: 8, maxHeight: 340, overflowY: 'auto', paddingRight: 4 },
+  stopRow: { border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, display: 'flex', justifyContent: 'space-between', gap: 10 },
+  stopTimes: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', color: '#334155', fontSize: 13 },
+  transferList: { display: 'grid', gap: 8 },
+  transferRow: { border: '1px solid #e2e8f0', borderLeft: '4px solid', borderRadius: 8, padding: 10 },
+  emptyCard: { background: 'white', border: '1px dashed #cbd5e1', borderRadius: 10, padding: 16, color: '#64748b', marginTop: 10 },
+  emptyState: { textAlign: 'center', padding: '52px 0', display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center' },
+  primaryBtn: { background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontWeight: 600 },
 };
