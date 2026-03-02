@@ -365,8 +365,10 @@ function DepartureDetailsPanel({
                 </div>
                 <div style={styles.metaRow}>Kierunek: {option.bus.headsign}</div>
                 <div style={styles.metaRow}>Bufor: {formatBuffer(option.buffer_sec)} • Dojście: {Math.round(option.walk_sec / 60)} min</div>
-                <div style={styles.metaRow}>Odjazd (plan + opóźnienie): {formatPlannedWithDelay(option.bus.scheduled_sec, option.bus.delay_sec)}</div>
-                <div style={styles.metaRow}>Przystanek planowanego odjazdu na przesiadce: {boardingStop?.stop_name ?? option.bus.stop_id}</div>
+                <div style={styles.metaRow}>Odjazd: {formatPlannedWithDelay(option.bus.scheduled_sec, option.bus.delay_sec)}</div>
+                <div style={styles.transferHint}>
+                  <strong>Przesiadka:</strong> wsiądź w <strong>{option.bus.route_id}</strong> na przystanku <strong>{boardingStop?.stop_name ?? option.bus.stop_id}</strong>.
+                </div>
                 {busStopsFromBoarding.length > 0 && (
                   <div style={styles.innerStopsList}>
                     {busStopsFromBoarding.map((stop) => (
@@ -386,7 +388,7 @@ function DepartureDetailsPanel({
 function VehicleMap({ mapData }: { mapData: MapData }) {
   return (
     <div style={styles.mapWrap}>
-      <MapContainer center={mapData.center} zoom={12} style={styles.mapCanvas} scrollWheelZoom>
+      <MapContainer center={mapData.center} zoom={13} style={styles.mapCanvas} scrollWheelZoom>
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -422,7 +424,7 @@ function StopRow({ stop, compact = false }: { stop: TripStop; compact?: boolean 
 
 function formatPlannedWithDelay(scheduledSec: number, delaySec: number | null): string {
   const delay = formatDelay(delaySec);
-  if (!delay || delay === 'na czas') return `${secToHHMM(scheduledSec)} (plan)`;
+  if (!delay || delay === 'na czas') return secToHHMM(scheduledSec);
   return `${secToHHMM(scheduledSec)} (${delay})`;
 }
 
@@ -491,8 +493,8 @@ function buildMapData(
     }
   });
 
-  const allPoints = [...trainPath, ...transferPaths.flatMap((path) => path.points), ...markers.map((m) => m.position)];
-  const center = allPoints[0] ?? DEFAULT_MAP_CENTER;
+  const trainMarker = markers.find((marker) => marker.id === 'train-pos');
+  const center = trainMarker?.position ?? trainPath[0] ?? markers[0]?.position ?? DEFAULT_MAP_CENTER;
 
   return { center, trainPath, transferPaths, markers };
 }
@@ -637,7 +639,8 @@ const styles: Record<string, React.CSSProperties> = {
   stopRow: { border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, display: 'flex', justifyContent: 'space-between', gap: 10 },
   stopTimes: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', color: '#334155', fontSize: 13 },
   transferList: { display: 'grid', gap: 8 },
-  transferRow: { border: '1px solid #e2e8f0', borderLeft: '4px solid', borderRadius: 8, padding: 10 },
+  transferRow: { border: '1px solid #e2e8f0', borderLeft: '4px solid', borderRadius: 8, padding: 10, background: '#f8fafc' },
+  transferHint: { marginTop: 8, fontSize: 14, color: '#0f172a', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '8px 10px' },
   mapWrap: { border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' },
   mapCanvas: { width: '100%', height: 260 },
   emptyCard: { background: 'white', border: '1px dashed #cbd5e1', borderRadius: 10, padding: 16, color: '#64748b', marginTop: 10 },
