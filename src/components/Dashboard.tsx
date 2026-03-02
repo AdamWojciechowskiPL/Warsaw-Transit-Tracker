@@ -20,7 +20,10 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [selectedDepartureKey, setSelectedDepartureKey] = useState<string | null>(null);
   const [tripDetails, setTripDetails] = useState<TripDetails | null>(null);
+  const [loading, setLoading] = useState(false);
   const [tripLoading, setTripLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   const fetchRecommendations = useCallback(async () => {
     if (!activeProfile) return;
