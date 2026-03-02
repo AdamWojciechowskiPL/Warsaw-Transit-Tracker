@@ -15,6 +15,8 @@ interface Props {
 }
 
 export function Dashboard({ activeProfile, onGoToSettings }: Props) {
+  const isMobile = useIsMobile();
+  const pageVisible = usePageVisible();
   const [result, setResult] = useState<RecommendationResult | null>(null);
   const [allOptions, setAllOptions] = useState<TransferOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -43,10 +45,12 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   }, [activeProfile]);
 
   useEffect(() => {
+    if (!pageVisible) return;
+
     fetchRecommendations();
     const interval = setInterval(fetchRecommendations, AUTO_REFRESH_INTERVAL);
     return () => clearInterval(interval);
-  }, [fetchRecommendations]);
+  }, [fetchRecommendations, pageVisible]);
 
   const groupedDepartures = useMemo(() => {
     const groups = new Map<string, TransferOption[]>();
@@ -86,6 +90,8 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   const selectedDeparture = groupedDepartures.find((group) => group.key === selectedDepartureKey) ?? null;
 
   useEffect(() => {
+    if (!pageVisible) return;
+
     const tripId = selectedDeparture?.representative.train.trip_id;
 
     if (!tripId) {
@@ -111,22 +117,25 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [selectedDeparture?.representative.train.trip_id]);
+  }, [selectedDeparture?.representative.train.trip_id, pageVisible]);
 
   useEffect(() => {
     const busTripIds = Array.from(
       new Set((selectedDeparture?.options ?? []).map((option) => option.bus.trip_id).filter((id): id is string => Boolean(id))),
     );
 
-    if (busTripIds.length === 0) {
+    if (!pageVisible || busTripIds.length === 0) {
       setBusTripsById({});
       return;
     }
 
+    const missingTripIds = busTripIds.filter((tripId) => !(tripId in busTripsById));
+    if (missingTripIds.length === 0) return;
+
     let cancelled = false;
 
     Promise.all(
-      busTripIds.map(async (tripId) => {
+      missingTripIds.map(async (tripId) => {
         try {
           const data = await api.getTripDetails(tripId);
           return [tripId, data.trip ?? null] as const;
@@ -136,13 +145,13 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       }),
     ).then((entries) => {
       if (cancelled) return;
-      setBusTripsById(Object.fromEntries(entries));
+      setBusTripsById((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
     });
 
     return () => {
       cancelled = true;
     };
-  }, [selectedDeparture]);
+  }, [selectedDeparture, busTripsById, pageVisible]);
 
   if (!activeProfile) {
     return (
@@ -155,12 +164,12 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
 
   return (
     <div style={styles.page}>
-      <div style={styles.topBar}>
+      <div style={{ ...styles.topBar, ...(isMobile ? styles.topBarMobile : {}) }}>
         <div>
-          <h2 style={styles.pageTitle}>{activeProfile.name}</h2>
-          <p style={styles.subtitle}>Najbliższe odjazdy + odjazdy sprzed maksymalnie 30 minut.</p>
+          <h2 style={{ ...styles.pageTitle, ...(isMobile ? styles.pageTitleMobile : {}) }}>{activeProfile.name}</h2>
+          <p style={{ ...styles.subtitle, ...(isMobile ? styles.subtitleMobile : {}) }}>Najbliższe odjazdy + odjazdy sprzed maksymalnie 30 minut.</p>
         </div>
-        <div style={styles.topActions}>
+        <div style={{ ...styles.topActions, ...(isMobile ? styles.topActionsMobile : {}) }}>
           {result && (
             <div style={styles.liveSources}>
               <span>{result.meta.live_status.wkd === 'available' ? '✅' : '❌'} WKD</span>
@@ -179,8 +188,8 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       {lastRefresh && <p style={styles.refreshText}>Ostatnie odświeżenie: {lastRefresh.toLocaleTimeString('pl-PL')}</p>}
       {error && <div style={styles.errorBanner}><AlertTriangle size={14} /> {error}</div>}
 
-      <div style={styles.layout}>
-        <section style={styles.leftPane}>
+      <div style={{ ...styles.layout, ...(isMobile ? styles.layoutMobile : {}) }}>
+        <section style={{ ...styles.leftPane, ...(isMobile ? styles.leftPaneMobile : {}) }}>
           <h3 style={styles.sectionTitle}>Odjazdy z przystanku początkowego</h3>
           {groupedDepartures.length === 0 ? (
             <div style={styles.emptyCard}>Brak odjazdów w oknie czasowym.</div>
@@ -196,7 +205,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
           )}
         </section>
 
-        <section style={styles.rightPane}>
+        <section style={{ ...styles.rightPane, ...(isMobile ? styles.rightPaneMobile : {}) }}>
           {selectedDeparture ? (
             <DepartureDetailsPanel
               representative={selectedDeparture.representative}
@@ -212,6 +221,46 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       </div>
     </div>
   );
+}
+
+function usePageVisible() {
+  const [visible, setVisible] = useState(() => {
+    if (typeof document === 'undefined') return true;
+    return document.visibilityState === 'visible';
+  });
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+
+    const onVisibilityChange = () => {
+      setVisible(document.visibilityState === 'visible');
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
+
+  return visible;
+}
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(max-width: 900px)').matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const media = window.matchMedia('(max-width: 900px)');
+    const update = () => setIsMobile(media.matches);
+    update();
+
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  return isMobile;
 }
 
 function DepartureCard({ option, selected, onClick }: { option: TransferOption; selected: boolean; onClick: () => void }) {
@@ -554,22 +603,29 @@ function nowSecLocal(): number {
 const styles: Record<string, React.CSSProperties> = {
   page: { paddingBottom: 32 },
   topBar: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', marginBottom: 8 },
+  topBarMobile: { flexDirection: 'column' },
   pageTitle: { margin: 0, fontSize: 28, color: '#0f172a' },
+  pageTitleMobile: { fontSize: 22 },
   subtitle: { margin: '6px 0 0', color: '#475569' },
+  subtitleMobile: { fontSize: 14 },
   topActions: { display: 'flex', gap: 8, alignItems: 'center' },
+  topActionsMobile: { width: '100%', justifyContent: 'space-between' },
   liveSources: { display: 'flex', gap: 8, fontSize: 13, color: '#334155' },
   iconBtn: { border: '1px solid #cbd5e1', borderRadius: 8, background: 'white', padding: 8, cursor: 'pointer', display: 'flex' },
   refreshText: { margin: '0 0 12px', color: '#64748b', fontSize: 13 },
   errorBanner: { display: 'flex', gap: 8, alignItems: 'center', background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', borderRadius: 8, padding: '10px 12px', marginBottom: 12 },
   layout: { display: 'grid', gridTemplateColumns: '360px 1fr', gap: 16, alignItems: 'start' },
+  layoutMobile: { gridTemplateColumns: '1fr' },
   leftPane: { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12, position: 'sticky', top: 84 },
+  leftPaneMobile: { position: 'static', top: 'auto' },
   rightPane: { minHeight: 300 },
+  rightPaneMobile: { minHeight: 0 },
   sectionTitle: { margin: 0, fontSize: 18, color: '#0f172a' },
   departureCard: { width: '100%', textAlign: 'left', border: '1px solid', borderRadius: 10, padding: 12, marginTop: 10, cursor: 'pointer' },
   rowBetween: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
   metaRow: { color: '#475569', marginTop: 6, fontSize: 14 },
   detailsPanel: { background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16 },
-  infoGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 },
+  infoGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginTop: 12 },
   infoBox: { display: 'flex', gap: 10, border: '1px solid #e2e8f0', borderRadius: 10, padding: 12, alignItems: 'flex-start' },
   infoLabel: { fontSize: 12, color: '#64748b', marginBottom: 3 },
   infoSub: { color: '#475569', marginTop: 4, fontSize: 13 },
@@ -583,7 +639,7 @@ const styles: Record<string, React.CSSProperties> = {
   transferList: { display: 'grid', gap: 8 },
   transferRow: { border: '1px solid #e2e8f0', borderLeft: '4px solid', borderRadius: 8, padding: 10 },
   mapWrap: { border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' },
-  mapCanvas: { width: '100%', height: 320 },
+  mapCanvas: { width: '100%', height: 260 },
   emptyCard: { background: 'white', border: '1px dashed #cbd5e1', borderRadius: 10, padding: 16, color: '#64748b', marginTop: 10 },
   emptyState: { textAlign: 'center', padding: '52px 0', display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center' },
   primaryBtn: { background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontWeight: 600 },

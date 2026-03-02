@@ -8,6 +8,7 @@ import { ProfileSettings } from './components/ProfileSettings';
 type View = 'dashboard' | 'settings';
 
 function App() {
+  const isMobile = useIsMobile();
   const {
     isLoading,
     isAuthenticated,
@@ -82,12 +83,12 @@ function App() {
 
   return (
     <div style={styles.app}>
-      <header style={styles.header}>
+      <header style={{ ...styles.header, ...(isMobile ? styles.headerMobile : {}) }}>
         <div style={styles.logo}>
           <span style={{ fontSize: 22 }}>🚆</span>
           <span style={styles.logoText}>Transit Tracker</span>
         </div>
-        <div style={styles.navRight}>
+        <div style={{ ...styles.navRight, ...(isMobile ? styles.navRightMobile : {}) }}>
           {isAuthenticated ? (
             <>
               <span style={styles.userName}>
@@ -111,7 +112,7 @@ function App() {
         </div>
       </header>
 
-      <main style={styles.main}>
+      <main style={{ ...styles.main, ...(isMobile ? styles.mainMobile : {}) }}>
         {!isAuthenticated ? (
           <div style={styles.loginPrompt}>
             <div style={styles.loginCard}>
@@ -130,7 +131,7 @@ function App() {
             </div>
           </div>
         ) : (
-          <div style={styles.content}>
+          <div style={{ ...styles.content, ...(isMobile ? styles.contentMobile : {}) }}>
             {view === 'dashboard' ? (
               <Dashboard
                 activeProfile={activeProfile}
@@ -149,6 +150,26 @@ function App() {
   );
 }
 
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(max-width: 900px)').matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const media = window.matchMedia('(max-width: 900px)');
+    const update = () => setIsMobile(media.matches);
+    update();
+
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  return isMobile;
+}
+
 const styles: Record<string, React.CSSProperties> = {
   app: { minHeight: '100vh', background: '#f9fafb', fontFamily: 'system-ui, -apple-system, sans-serif' },
   header: {
@@ -156,19 +177,23 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
     position: 'sticky', top: 0, zIndex: 100, boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
   },
+  headerMobile: { padding: '10px 12px', flexWrap: 'wrap', gap: 8 },
   logo: { display: 'flex', alignItems: 'center', gap: 8 },
   logoText: { fontWeight: 800, fontSize: 18, color: '#1e3a5f' },
   navRight: { display: 'flex', alignItems: 'center', gap: 12 },
+  navRightMobile: { width: '100%', justifyContent: 'space-between' },
   userName: { fontSize: 14, color: '#6b7280' },
   btnLogin: { background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 600 },
   btnLogout: { background: 'none', border: '1px solid #e5e7eb', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', color: '#6b7280', fontSize: 14 },
   loadingScreen: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 16 },
   spinner: { width: 40, height: 40, border: '3px solid #e5e7eb', borderTopColor: '#2563eb', borderRadius: '50%', animation: 'spin 0.8s linear infinite' },
   main: { flex: 1 },
+  mainMobile: { paddingBottom: 12 },
   loginPrompt: { display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 'calc(100vh - 65px)' },
   loginCard: { background: 'white', borderRadius: 16, padding: '48px 40px', boxShadow: '0 4px 24px rgba(0,0,0,0.10)', textAlign: 'center', maxWidth: 400 },
   btnLoginBig: { background: '#2563eb', color: 'white', border: 'none', borderRadius: 10, padding: '14px 32px', cursor: 'pointer', fontWeight: 700, fontSize: 17, width: '100%' },
   content: { maxWidth: 1240, margin: '0 auto', padding: '24px 16px' },
+  contentMobile: { padding: '12px 8px' },
 };
 
 export default App;
