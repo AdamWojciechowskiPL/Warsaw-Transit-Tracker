@@ -3,11 +3,14 @@ import { Departure, TripDetails, TripStop } from "./types";
 // Cache in-memory (działa dopóki instancja Lambdy "żyje")
 const CACHE: Record<string, { data: any[]; timestamp: number }> = {};
 const TRIP_CACHE: Record<string, { data: TripDetails; timestamp: number }> = {};
+const IN_FLIGHT_DEPARTURES: Record<string, Promise<Departure[]>> = {};
+const IN_FLIGHT_TRIPS: Record<string, Promise<TripDetails | null>> = {};
 const CACHE_TTL_MS = 15_000; // 15 sekund
 const TRIP_CACHE_TTL_MS = 30_000; // 30 sekund
 const REQUEST_TIMEOUT_MS = 8_000; // Wydłużony timeout do 8s
 const MAX_RETRIES = 2; // Maksymalna liczba powtórzeń w przypadku błędów 5xx
 const STOP_DELAY_LOOKUP_CONCURRENCY = 6;
+const RATE_LIMIT_WAIT_MS = 2_000;
 
 type RawDeparture = Record<string, any>;
 
@@ -21,6 +24,17 @@ type RawTripResponse = {
 
 export class CzynaczasClient {
   async getDepartures(stopId: string, limit: number = 10): Promise<Departure[]> {
+    const key = `${stopId}:${limit}`;
+    if (IN_FLIGHT_DEPARTURES[key]) return IN_FLIGHT_DEPARTURES[key];
+
+    IN_FLIGHT_DEPARTURES[key] = this.fetchDepartures(stopId, limit).finally(() => {
+      delete IN_FLIGHT_DEPARTURES[key];
+    });
+
+    return IN_FLIGHT_DEPARTURES[key];
+  }
+
+  private async fetchDepartures(stopId: string, limit: number): Promise<Departure[]> {
     const url = `https://czynaczas.pl/api/warsaw/timetable/${stopId}?limit=40`;
 
     const now = Date.now();
@@ -50,6 +64,11 @@ export class CzynaczasClient {
         console.log(`[CzynaczasClient] Response status: ${response.status} ${response.statusText}`);
 
         if (!response.ok) {
+          if (response.status === 429) {
+            const retryAfter = this.parseRetryAfterMs(response.headers.get('retry-after'));
+            const waitMs = retryAfter ?? attempt * RATE_LIMIT_WAIT_MS;
+            throw new Error(`RATE_LIMIT:${waitMs}`);
+          }
           throw new Error(`External API error: ${response.status}`);
         }
 
@@ -73,9 +92,9 @@ export class CzynaczasClient {
         lastError = error;
         console.error(`[CzynaczasClient] Error fetching ${stopId} (Attempt ${attempt}):`, error.message);
 
-        // Czekamy chwilę przed kolejną próbą (exponential backoff)
         if (attempt <= MAX_RETRIES) {
-          const delayMs = attempt * 1000;
+          const rateLimitDelay = this.readRateLimitDelay(lastError);
+          const delayMs = rateLimitDelay ?? attempt * 1000;
           console.log(`[CzynaczasClient] Retrying in ${delayMs}ms...`);
           await new Promise(res => setTimeout(res, delayMs));
         }
@@ -105,6 +124,16 @@ export class CzynaczasClient {
   }
 
   async getTripDetails(tripId: string): Promise<TripDetails | null> {
+    if (IN_FLIGHT_TRIPS[tripId]) return IN_FLIGHT_TRIPS[tripId];
+
+    IN_FLIGHT_TRIPS[tripId] = this.fetchTripDetails(tripId).finally(() => {
+      delete IN_FLIGHT_TRIPS[tripId];
+    });
+
+    return IN_FLIGHT_TRIPS[tripId];
+  }
+
+  private async fetchTripDetails(tripId: string): Promise<TripDetails | null> {
     const now = Date.now();
     if (TRIP_CACHE[tripId] && (now - TRIP_CACHE[tripId].timestamp < TRIP_CACHE_TTL_MS)) {
       return TRIP_CACHE[tripId].data;
@@ -112,10 +141,7 @@ export class CzynaczasClient {
 
     const encodedTripId = encodeURIComponent(tripId);
     const url = `https://czynaczas.pl/api/warsaw/trip?trip_id=${encodedTripId}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Trip API error: ${response.status}`);
-    }
+    const response = await this.fetchWithRateLimitRetry(url, `trip:${tripId}`);
 
     const raw = await response.json() as RawTripResponse;
     if (!raw.shape || raw.shape.type !== "LineString" || !Array.isArray(raw.shape.coordinates) || !Array.isArray(raw.stops)) {
@@ -136,6 +162,55 @@ export class CzynaczasClient {
 
     TRIP_CACHE[tripId] = { data: details, timestamp: Date.now() };
     return details;
+  }
+
+  private async fetchWithRateLimitRetry(url: string, logKey: string): Promise<Response> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          if (response.status === 429) {
+            const retryAfter = this.parseRetryAfterMs(response.headers.get('retry-after'));
+            const waitMs = retryAfter ?? attempt * RATE_LIMIT_WAIT_MS;
+            throw new Error(`RATE_LIMIT:${waitMs}`);
+          }
+          throw new Error(`Trip API error: ${response.status}`);
+        }
+
+        return response;
+      } catch (error: any) {
+        lastError = error;
+        if (attempt <= MAX_RETRIES) {
+          const rateLimitDelay = this.readRateLimitDelay(lastError);
+          const delayMs = rateLimitDelay ?? attempt * 1000;
+          console.warn(`[CzynaczasClient] ${logKey} retry ${attempt}/${MAX_RETRIES + 1} in ${delayMs}ms`);
+          await new Promise((res) => setTimeout(res, delayMs));
+        }
+      }
+    }
+
+    throw lastError ?? new Error('Trip API request failed');
+  }
+
+  private parseRetryAfterMs(retryAfter: string | null): number | null {
+    if (!retryAfter) return null;
+
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isNaN(dateMs)) return null;
+
+    return Math.max(0, dateMs - Date.now());
+  }
+
+  private readRateLimitDelay(error: Error | null): number | null {
+    if (!error?.message?.startsWith('RATE_LIMIT:')) return null;
+
+    const parsed = Number(error.message.split(':')[1]);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   }
 
   private async enrichStopsWithLiveDelay(stops: TripStop[]): Promise<TripStop[]> {
