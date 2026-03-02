@@ -1,10 +1,11 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Activity, AlertTriangle, Clock3, MapPin, RefreshCw, Settings } from 'lucide-react';
 import { api } from '../api';
-import { RecommendationResult, TransferOption, RouteProfile, Departure, TripDetails } from '../types';
-import { secToHHMM, formatDelay, formatBuffer, riskColor, riskLabel } from '../utils/time';
-import { RefreshCw, AlertTriangle, Settings, Activity, MapPin } from 'lucide-react';
+import { Departure, RecommendationResult, RouteProfile, TransferOption, TripDetails, TripStop } from '../types';
+import { formatBuffer, formatDelay, riskColor, riskLabel, secToHHMM } from '../utils/time';
 
 const AUTO_REFRESH_INTERVAL = 25_000;
+const PAST_WINDOW_SEC = 30 * 60;
 
 interface Props {
   activeProfile: RouteProfile | null;
@@ -16,44 +17,27 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
   const [allOptions, setAllOptions] = useState<TransferOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
-  
-  // Tryb live
-  const [isLiveMode, setIsLiveMode] = useState(false);
+  const [selectedDepartureKey, setSelectedDepartureKey] = useState<string | null>(null);
   const [tripDetails, setTripDetails] = useState<TripDetails | null>(null);
   const [tripLoading, setTripLoading] = useState(false);
 
   const fetchRecommendations = useCallback(async () => {
     if (!activeProfile) return;
+
     setLoading(true);
     setError(null);
     try {
-      const data = await api.getRecommendation(activeProfile.id, 8) as RecommendationResult;
-
-      // Backend zwraca kilka opcji przesiadek dla jednego kursu WKD.
-      // Na dashboardzie pokazujemy tylko jedną (najlepszą) rekomendację
-      // dla każdego odjazdu pierwszego etapu, a pełną listę trzymamy
-      // do wykorzystania w trybie Live.
+      const data = await api.getRecommendation(activeProfile.id, 16) as RecommendationResult;
+      setResult(data);
       setAllOptions(data.options);
-      const dashboardOptions = getDashboardOptions(data.options);
-
-      setResult({
-        ...data,
-        options: dashboardOptions,
-      });
       setLastRefresh(new Date());
-      if (dashboardOptions.length > 0 && !selectedOptionId) {
-        const now = nowSecLocal();
-        const firstFuture = dashboardOptions.find((opt) => !isTrainInTransit(opt, now));
-        setSelectedOptionId((firstFuture ?? dashboardOptions[0]).id);
-      }
     } catch (e: any) {
-      setError(e.message);
+      setError(e.message ?? 'Nie udało się pobrać danych.');
     } finally {
       setLoading(false);
     }
-  }, [activeProfile, selectedOptionId]);
+  }, [activeProfile]);
 
   useEffect(() => {
     fetchRecommendations();
@@ -61,753 +45,346 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     return () => clearInterval(interval);
   }, [fetchRecommendations]);
 
-  // Jeśli jesteśmy w trybie live, ale wybrana opcja zniknęła (np. minęła),
-  // znajdź pierwszą dostępną (najlepiej tę samą linię, lub po prostu pierwszą).
-  useEffect(() => {
-    if (isLiveMode && result) {
-      const optExists = result.options.find(o => o.id === selectedOptionId);
-      if (!optExists && result.options.length > 0) {
-        setSelectedOptionId(result.options[0].id);
-      }
+  const groupedDepartures = useMemo(() => {
+    const groups = new Map<string, TransferOption[]>();
+
+    for (const option of allOptions) {
+      const key = getFirstRideKey(option);
+      const current = groups.get(key) ?? [];
+      current.push(option);
+      groups.set(key, current);
     }
-  }, [result, isLiveMode, selectedOptionId]);
 
+    const now = nowSecLocal();
+
+    return [...groups.entries()]
+      .map(([key, options]) => ({
+        key,
+        representative: chooseRepresentativeOption(options),
+        options: sortTransfersByFeasibility(options),
+      }))
+      .filter((group) => departureSec(group.representative.train) >= now - PAST_WINDOW_SEC)
+      .sort((a, b) => departureSec(a.representative.train) - departureSec(b.representative.train));
+  }, [allOptions]);
 
   useEffect(() => {
-    const tripId = (result?.options ?? []).find((o) => o.id === selectedOptionId)?.train.trip_id ?? null;
+    if (groupedDepartures.length === 0) {
+      setSelectedDepartureKey(null);
+      return;
+    }
 
-    if (!isLiveMode || !tripId) {
+    if (!selectedDepartureKey || !groupedDepartures.some((g) => g.key === selectedDepartureKey)) {
+      const now = nowSecLocal();
+      const firstUpcoming = groupedDepartures.find((g) => departureSec(g.representative.train) >= now);
+      setSelectedDepartureKey((firstUpcoming ?? groupedDepartures[0]).key);
+    }
+  }, [groupedDepartures, selectedDepartureKey]);
+
+  const selectedDeparture = groupedDepartures.find((group) => group.key === selectedDepartureKey) ?? null;
+
+  useEffect(() => {
+    const tripId = selectedDeparture?.representative.train.trip_id;
+
+    if (!tripId) {
       setTripDetails(null);
       setTripLoading(false);
       return;
     }
 
-    let isCancelled = false;
+    let cancelled = false;
     setTripLoading(true);
+
     api.getTripDetails(tripId)
       .then((data) => {
-        if (!isCancelled) setTripDetails(data.trip ?? null);
+        if (!cancelled) setTripDetails(data.trip ?? null);
       })
       .catch(() => {
-        if (!isCancelled) setTripDetails(null);
+        if (!cancelled) setTripDetails(null);
       })
       .finally(() => {
-        if (!isCancelled) setTripLoading(false);
+        if (!cancelled) setTripLoading(false);
       });
 
     return () => {
-      isCancelled = true;
+      cancelled = true;
     };
-  }, [isLiveMode, selectedOptionId, result]);
+  }, [selectedDeparture?.representative.train.trip_id]);
 
   if (!activeProfile) {
     return (
       <div style={styles.emptyState}>
-        <p style={{ fontSize: 18, color: '#6b7280' }}>Brak aktywnego profilu trasy.</p>
-        <button style={styles.btnPrimary} onClick={onGoToSettings}>Skonfiguruj trasę</button>
+        <p style={{ fontSize: 18, color: '#64748b' }}>Brak aktywnego profilu trasy.</p>
+        <button style={styles.primaryBtn} onClick={onGoToSettings}>Skonfiguruj trasę</button>
       </div>
     );
   }
 
-  const now = nowSecLocal();
-  const inTransitDashboardOptions = (result?.options ?? []).filter((opt) => isTrainInTransit(opt, now));
-  const futureDashboardOptions = (result?.options ?? []).filter((opt) => !isTrainInTransit(opt, now));
-  const selectedOption = (result?.options ?? []).find(o => o.id === selectedOptionId)
-    ?? futureDashboardOptions[0]
-    ?? inTransitDashboardOptions[0]
-    ?? null;
-  const selectedFirstRideKey = selectedOption ? getFirstRideKey(selectedOption) : null;
-  const transferChoices = selectedFirstRideKey
-    ? sortTransfersForLive(allOptions.filter((o) => getFirstRideKey(o) === selectedFirstRideKey))
-    : [];
-
   return (
-    <div style={styles.container}>
-      {/* Header */}
-      <div style={styles.header}>
+    <div style={styles.page}>
+      <div style={styles.topBar}>
         <div>
-          <h2 style={styles.profileName}>{isLiveMode ? '🔴 Tryb Live' : activeProfile.name}</h2>
-          {lastRefresh && (
-            <span style={styles.lastRefresh}>
-              Odświeżono: {lastRefresh.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-            </span>
-          )}
+          <h2 style={styles.pageTitle}>{activeProfile.name}</h2>
+          <p style={styles.subtitle}>Najbliższe odjazdy + odjazdy sprzed maksymalnie 30 minut.</p>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={styles.topActions}>
           {result && (
-            <div style={styles.liveStatus}>
+            <div style={styles.liveSources}>
               <span>{result.meta.live_status.wkd === 'available' ? '✅' : '❌'} WKD</span>
               <span>{result.meta.live_status.ztm === 'available' ? '✅' : '❌'} ZTM</span>
             </div>
           )}
-          <button
-            style={{ ...styles.btnIcon, ...(loading ? styles.spinning : {}) }}
-            onClick={fetchRecommendations}
-            disabled={loading}
-            title="Odśwież"
-          >
-            <RefreshCw size={18} />
+          <button style={styles.iconBtn} onClick={fetchRecommendations} title="Odśwież" disabled={loading}>
+            <RefreshCw size={16} />
           </button>
-          {!isLiveMode && (
-            <button style={styles.btnIcon} onClick={onGoToSettings} title="Ustawienia">
-              <Settings size={18} />
-            </button>
-          )}
-          {isLiveMode && (
-             <button style={styles.btnDanger} onClick={() => setIsLiveMode(false)} title="Zakończ trasę">
-               Zakończ
-             </button>
-          )}
+          <button style={styles.iconBtn} onClick={onGoToSettings} title="Ustawienia trasy">
+            <Settings size={16} />
+          </button>
         </div>
       </div>
 
-      {error && (
-        <div style={styles.errorBanner}>
-          <AlertTriangle size={16} /> {error}
-        </div>
-      )}
+      {lastRefresh && <p style={styles.refreshText}>Ostatnie odświeżenie: {lastRefresh.toLocaleTimeString('pl-PL')}</p>}
+      {error && <div style={styles.errorBanner}><AlertTriangle size={14} /> {error}</div>}
 
-      {!loading && result && result.options.length === 0 && (
-        <div style={styles.emptyState}>
-          <p>Brak dostępnych połączeń w tej chwili.</p>
-        </div>
-      )}
-
-      {isLiveMode && selectedOption ? (
-        <LiveGuidanceView 
-          option={selectedOption} 
-          transferChoices={transferChoices}
-          onSwitchAlternative={(id) => setSelectedOptionId(id)}
-          tripDetails={tripDetails}
-          tripLoading={tripLoading}
-        />
-      ) : (
-        <>
-          {inTransitDashboardOptions.length > 0 && (
-            <div style={styles.alternativesSection}>
-              <h3 style={styles.sectionTitle}>Połączenia w ruchu (jeszcze przed przesiadką)</h3>
-              <div style={styles.alternativesList}>
-                {inTransitDashboardOptions.map((opt) => (
-                  <AlternativeCard
-                    key={opt.id}
-                    option={opt}
-                    isSelected={opt.id === selectedOptionId}
-                    onClick={() => {
-                      setSelectedOptionId(opt.id);
-                      setIsLiveMode(true);
-                    }}
-                  />
-                ))}
-              </div>
-            </div>
+      <div style={styles.layout}>
+        <section style={styles.leftPane}>
+          <h3 style={styles.sectionTitle}>Odjazdy z przystanku początkowego</h3>
+          {groupedDepartures.length === 0 ? (
+            <div style={styles.emptyCard}>Brak odjazdów w oknie czasowym.</div>
+          ) : (
+            groupedDepartures.map((group) => (
+              <DepartureCard
+                key={group.key}
+                option={group.representative}
+                selected={group.key === selectedDepartureKey}
+                onClick={() => setSelectedDepartureKey(group.key)}
+              />
+            ))
           )}
+        </section>
 
-          {selectedOption && (
-            <BestOptionCard 
-              option={selectedOption} 
-              onStartLive={() => setIsLiveMode(true)}
+        <section style={styles.rightPane}>
+          {selectedDeparture ? (
+            <DepartureDetailsPanel
+              representative={selectedDeparture.representative}
+              options={selectedDeparture.options}
+              tripDetails={tripDetails}
+              tripLoading={tripLoading}
             />
+          ) : (
+            <div style={styles.emptyCard}>Wybierz odjazd, aby zobaczyć szczegóły trasy i przesiadek.</div>
           )}
-          {futureDashboardOptions.length > 1 && (
-            <div style={styles.alternativesSection}>
-              <h3 style={styles.sectionTitle}>Alternatywy</h3>
-              <div style={styles.alternativesList}>
-                {futureDashboardOptions.map((opt) => (
-                  <AlternativeCard
-                    key={opt.id}
-                    option={opt}
-                    isSelected={opt.id === selectedOptionId}
-                    onClick={() => setSelectedOptionId(opt.id)}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-        </>
-      )}
+        </section>
+      </div>
     </div>
   );
+}
+
+function DepartureCard({ option, selected, onClick }: { option: TransferOption; selected: boolean; onClick: () => void }) {
+  const dep = departureSec(option.train);
+  const diffMin = Math.round((dep - nowSecLocal()) / 60);
+  const stateLabel = diffMin < 0 ? `${Math.abs(diffMin)} min temu` : `za ${diffMin} min`;
+
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        ...styles.departureCard,
+        borderColor: selected ? '#2563eb' : '#dbe2ea',
+        background: selected ? '#eff6ff' : 'white',
+      }}
+    >
+      <div style={styles.rowBetween}>
+        <strong>🚂 {secToHHMM(dep)}</strong>
+        <span style={{ color: diffMin < 0 ? '#b45309' : '#166534', fontWeight: 700 }}>{stateLabel}</span>
+      </div>
+      <div style={styles.metaRow}>Kierunek: {option.train.headsign}</div>
+      <div style={styles.metaRow}>Linia przesiadkowa (najlepsza): {option.bus.route_id} o {secToHHMM(departureSec(option.bus))}</div>
+    </button>
+  );
+}
+
+function DepartureDetailsPanel({
+  representative,
+  options,
+  tripDetails,
+  tripLoading,
+}: {
+  representative: TransferOption;
+  options: TransferOption[];
+  tripDetails: TripDetails | null;
+  tripLoading: boolean;
+}) {
+  const currentPositionLabel = getCurrentVehiclePositionLabel(representative, tripDetails);
+
+  return (
+    <div style={styles.detailsPanel}>
+      <h3 style={styles.sectionTitle}>Szczegóły odjazdu {secToHHMM(departureSec(representative.train))}</h3>
+
+      <div style={styles.infoGrid}>
+        <div style={styles.infoBox}>
+          <Clock3 size={16} />
+          <div>
+            <div style={styles.infoLabel}>WKD</div>
+            <strong>{representative.train.route_id} • {representative.train.headsign}</strong>
+            <div style={styles.infoSub}>Odjazd: {secToHHMM(departureSec(representative.train))} {formatDelay(representative.train.delay_sec)}</div>
+          </div>
+        </div>
+
+        <div style={styles.infoBox}>
+          <Activity size={16} />
+          <div>
+            <div style={styles.infoLabel}>Pozycja pojazdu</div>
+            <strong>{currentPositionLabel}</strong>
+            <div style={styles.infoSub}>Aktualizowane na podstawie live/schedule.</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={styles.subsection}>
+        <h4 style={styles.subTitle}><MapPin size={14} /> Cała trasa kursu i rozkład</h4>
+        {tripLoading && <p style={styles.muted}>Ładowanie pełnej trasy kursu…</p>}
+        {!tripLoading && !tripDetails && <p style={styles.muted}>Brak szczegółów trasy dla tego kursu.</p>}
+        {!tripLoading && tripDetails && (
+          <div style={styles.stopsList}>
+            {tripDetails.stops.map((stop) => (
+              <StopRow key={`${stop.stop_id}-${stop.seq}`} stop={stop} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={styles.subsection}>
+        <h4 style={styles.subTitle}>Przesiadki (od najszybszej możliwej)</h4>
+        <div style={styles.transferList}>
+          {options.map((option) => {
+            const risk = riskColor(option.risk);
+            return (
+              <div key={option.id} style={{ ...styles.transferRow, borderLeftColor: risk }}>
+                <div style={styles.rowBetween}>
+                  <strong>🚌 {option.bus.route_id} • {secToHHMM(departureSec(option.bus))}</strong>
+                  <span style={{ color: risk, fontWeight: 700 }}>{riskLabel(option.risk)}</span>
+                </div>
+                <div style={styles.metaRow}>Kierunek: {option.bus.headsign}</div>
+                <div style={styles.metaRow}>Bufor: {formatBuffer(option.buffer_sec)} • Dojście: {Math.round(option.walk_sec / 60)} min</div>
+                <div style={styles.metaRow}>Live: {formatDelay(option.bus.delay_sec)} {option.bus.live_sec ? '(tracking aktywny)' : '(brak live)'} </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StopRow({ stop }: { stop: TripStop }) {
+  return (
+    <div style={styles.stopRow}>
+      <div>
+        <strong>{stop.seq}. {stop.stop_name}</strong>
+      </div>
+      <div style={styles.stopTimes}>
+        <span>Plan: {secToHHMM(stop.scheduled_sec)}</span>
+        <span>Live: {secToHHMM(stop.estimated_live_sec ?? stop.scheduled_sec)} {formatDelay(stop.delay_sec)}</span>
+      </div>
+    </div>
+  );
+}
+
+function getCurrentVehiclePositionLabel(option: TransferOption, tripDetails: TripDetails | null): string {
+  const now = nowSecLocal();
+
+  if (tripDetails && tripDetails.stops.length > 1) {
+    const sortedStops = [...tripDetails.stops].sort((a, b) => a.seq - b.seq);
+    const nextStop = sortedStops.find((stop) => (stop.estimated_live_sec ?? stop.scheduled_sec) >= now);
+
+    if (!nextStop) return 'Kurs powinien być już po ostatnim przystanku.';
+    if (nextStop.seq === sortedStops[0].seq) return `Przed odjazdem z: ${nextStop.stop_name}`;
+
+    const prevStop = sortedStops.find((stop) => stop.seq === nextStop.seq - 1);
+    if (!prevStop) return `Zbliża się do: ${nextStop.stop_name}`;
+
+    return `Między: ${prevStop.stop_name} → ${nextStop.stop_name}`;
+  }
+
+  const trainDeparture = departureSec(option.train);
+  const transferArrival = getTransferStationArrivalTime(option);
+
+  if (now < trainDeparture) return 'Na przystanku początkowym (przed odjazdem).';
+  if (now < transferArrival) return 'W trasie do punktu przesiadki.';
+
+  return 'Po dojechaniu do punktu przesiadki.';
 }
 
 function departureSec(departure: Departure): number {
   return departure.live_sec ?? departure.scheduled_sec;
 }
 
-/**
- * Klucz identyfikujący KURS POCIĄGU (używany w trybie Live do grupowania
- * wszystkich opcji autobusowych dla aktualnie monitorowanego składu WKD).
- * NIE używaj tego klucza do deduplikacji listy rekomendacji – tam potrzebny
- * jest szerszy klucz uwzględniający też autobus (getOptionDedupeKey).
- */
-function getFirstRideKey(option: TransferOption): string {
-  // Klucz musi być stabilny i rozróżniać kolejne odjazdy.
-  // Nie polegamy wyłącznie na trip_id, bo bywa nieunikalne / brakujące.
-  return `${option.train.route_id}:${option.train.stop_id}:${option.train.scheduled_sec}`;
-}
-
-/**
- * Klucz do deduplikacji opcji na liście rekomendacji.
- * Łączy kurs pociągu z kursem autobusu i wariantem przystanku,
- * dzięki czemu różne połączenia autobusowe dla tego samego pociągu
- * są traktowane jako osobne opcje (a nie składane w jedną).
- */
-function getOptionDedupeKey(option: TransferOption): string {
-  return `${getFirstRideKey(option)}:${option.bus.route_id}:${option.bus.scheduled_sec}:${option.bus_stop_variant ?? ''}`;
-}
-
-function optionChronologicalSec(option: TransferOption): number {
-  return departureSec(option.train);
-}
-
-function riskScore(risk: TransferOption['risk']): number {
-  if (risk === 'LOW') return 0;
-  if (risk === 'MED') return 1;
-  return 2;
-}
-
-function chooseBestTransferForFirstRide(options: TransferOption[]): TransferOption {
-  return [...options].sort((a, b) => {
-    // Preferujemy najszybszy realny odjazd autobusu dla tego samego pociągu,
-    // aby domyślnie wybierać wariant bez zbędnie długiego czekania.
-    const busCmp = departureSec(a.bus) - departureSec(b.bus);
-    if (busCmp !== 0) return busCmp;
-
-    const riskCmp = riskScore(a.risk) - riskScore(b.risk);
-    if (riskCmp !== 0) return riskCmp;
-
-    const bufferCmp = b.buffer_sec - a.buffer_sec;
-    if (bufferCmp !== 0) return bufferCmp;
-
-    return optionChronologicalSec(a) - optionChronologicalSec(b);
-  })[0];
-}
-
-function getDashboardOptions(options: TransferOption[]): TransferOption[] {
-  const dedupedByTrainBus = new Map<string, TransferOption[]>();
-  for (const option of options) {
-    const key = getOptionDedupeKey(option);
-    const curr = dedupedByTrainBus.get(key) ?? [];
-    curr.push(option);
-    dedupedByTrainBus.set(key, curr);
-  }
-
-  const uniqueOptions = [...dedupedByTrainBus.values()]
-    .map((group) => chooseBestTransferForFirstRide(group));
-
-  const groupedByFirstRide = new Map<string, TransferOption[]>();
-  for (const option of uniqueOptions) {
-    const key = getFirstRideKey(option);
-    const curr = groupedByFirstRide.get(key) ?? [];
-    curr.push(option);
-    groupedByFirstRide.set(key, curr);
-  }
-
-  return [...groupedByFirstRide.values()]
-    .map((group) => chooseBestTransferForFirstRide(group))
-    .sort((a, b) => optionChronologicalSec(a) - optionChronologicalSec(b));
-}
-
-function sortTransfersForLive(options: TransferOption[]): TransferOption[] {
-  return [...options].sort((a, b) => {
-    const aArrival = getTransferStationArrivalTime(a);
-    const bArrival = getTransferStationArrivalTime(b);
-
-    const arrivalCmp = aArrival - bArrival;
-    if (arrivalCmp !== 0) return arrivalCmp;
-
-    const busCmp = departureSec(a.bus) - departureSec(b.bus);
-    if (busCmp !== 0) return busCmp;
-
-    const bufferCmp = b.buffer_sec - a.buffer_sec;
-    if (bufferCmp !== 0) return bufferCmp;
-
-    return riskScore(a.risk) - riskScore(b.risk);
-  });
-}
-
 function getTransferStationArrivalTime(option: TransferOption): number {
-  if (option.train_transfer) {
-    return option.train_transfer.live_sec ?? option.train_transfer.scheduled_sec;
-  }
-  if (option.train_transfer_time_sec) {
-    return option.train_transfer_time_sec;
-  }
+  if (option.train_transfer) return departureSec(option.train_transfer);
+  if (option.train_transfer_time_sec) return option.train_transfer_time_sec;
   return option.ready_sec - option.walk_sec - option.exit_buffer_sec;
 }
 
-function isTrainInTransit(option: TransferOption, nowSec: number): boolean {
-  const trainDepartureSec = departureSec(option.train);
-  const transferArrivalSec = getTransferStationArrivalTime(option);
-  return nowSec >= trainDepartureSec && nowSec < transferArrivalSec;
+function getFirstRideKey(option: TransferOption): string {
+  return `${option.train.route_id}:${option.train.stop_id}:${option.train.scheduled_sec}`;
 }
 
-function BestOptionCard({ option, onStartLive }: { option: TransferOption; onStartLive: () => void }) {
-  const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
-  const trainDelay = formatDelay(option.train.delay_sec);
-  
-  const arrivalSec = getTransferStationArrivalTime(option);
-  const arrivalTime = secToHHMM(arrivalSec);
-
-  const busTime = secToHHMM(option.bus.live_sec ?? option.bus.scheduled_sec);
-  const busDelay = formatDelay(option.bus.delay_sec);
-  const riskC = riskColor(option.risk);
-
-  return (
-    <div style={{ ...styles.bestCard, borderColor: riskC }}>
-      {/* Train row */}
-      <div style={styles.transportRow}>
-        <div style={styles.transportIcon}>🚂</div>
-        <div style={styles.transportInfo}>
-          <span style={styles.lineLabel}>WKD</span>
-          <span style={styles.timeMain}>{trainTime}</span>
-          {option.train.delay_sec !== null && (
-            <span style={{ ...styles.delayBadge, color: option.train.delay_sec > 0 ? '#dc2626' : '#16a34a' }}>
-              {trainDelay}
-            </span>
-          )}
-          {!option.train.live_sec && (
-            <span style={styles.noLive}>⚠️ Brak live</span>
-          )}
-        </div>
-        <div style={styles.headsign}>{option.train.headsign}</div>
-      </div>
-
-      <div style={styles.arrivalRow}>
-        <MapPin size={14} /> Dojazd do przesiadki: <strong>{arrivalTime}</strong>
-      </div>
-
-      {/* Walk indicator */}
-      <div style={styles.walkRow}>
-        <span>🚶 {Math.floor(option.walk_sec / 60)} min dojścia (planowo)</span>
-      </div>
-
-      {option.bus_stop_variant && (
-        <div style={styles.variantBanner}>
-          🚏 IDŹ NA PRZYSTANEK: <strong>WARIANT {option.bus_stop_variant}</strong>
-          {option.bus.stop_id && <span style={styles.stopIdNote}> (stop: {option.bus.stop_id})</span>}
-        </div>
-      )}
-
-      {/* Bus row */}
-      <div style={styles.transportRow}>
-        <div style={styles.transportIcon}>🚌</div>
-        <div style={styles.transportInfo}>
-          <span style={styles.lineLabel}>Linia {option.bus.route_id}</span>
-          <span style={styles.timeMain}>{busTime}</span>
-          {option.bus.delay_sec !== null && (
-            <span style={{ ...styles.delayBadge, color: option.bus.delay_sec > 0 ? '#dc2626' : '#16a34a' }}>
-              {busDelay}
-            </span>
-          )}
-          {!option.bus.live_sec && (
-            <span style={styles.noLive}>⚠️ Brak live</span>
-          )}
-        </div>
-        <div style={styles.headsign}>{option.bus.headsign}</div>
-      </div>
-
-      {/* Buffer */}
-      <div style={{ ...styles.bufferRow, backgroundColor: riskC + '18' }}>
-        <span style={{ color: riskC, fontWeight: 700, fontSize: 18 }}>
-          {riskLabel(option.risk)}
-        </span>
-        <span style={styles.bufferTime}>Bufor: {formatBuffer(option.buffer_sec)}</span>
-      </div>
-
-      {/* Start Live button */}
-      <button style={styles.btnStartLive} onClick={onStartLive}>
-        <Activity size={18} /> Podłącz trasę (Live)
-      </button>
-
-      {/* Warnings */}
-      {option.warnings.length > 0 && (
-        <div style={styles.warningsSection}>
-          {option.warnings.map((w, i) => (
-            <div key={i} style={styles.warningItem}><AlertTriangle size={14} /> {w}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function chooseRepresentativeOption(options: TransferOption[]): TransferOption {
+  return sortTransfersByFeasibility(options)[0];
 }
 
-function LiveGuidanceView({ option, transferChoices, onSwitchAlternative, tripDetails, tripLoading }: { option: TransferOption; transferChoices: TransferOption[]; onSwitchAlternative: (id: string) => void; tripDetails: TripDetails | null; tripLoading: boolean }) {
-  const trainDepartureSec = departureSec(option.train);
-  const transferArrivalSec = getTransferStationArrivalTime(option);
-  const busDepartureSec = departureSec(option.bus);
+function sortTransfersByFeasibility(options: TransferOption[]): TransferOption[] {
+  return [...options].sort((a, b) => {
+    const aReady = a.ready_sec;
+    const bReady = b.ready_sec;
 
-  const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
-  const arrivalTime = secToHHMM(transferArrivalSec);
-  const busTime = secToHHMM(option.bus.live_sec ?? option.bus.scheduled_sec);
-  const riskC = riskColor(option.risk);
+    if (aReady !== bReady) return aReady - bReady;
 
-  const isRisky = option.risk === 'HIGH' || option.buffer_sec < 0;
-  const nowSec = nowSecLocal();
-  const livePosition = getLiveVehiclePositionLabel(nowSec, trainDepartureSec, transferArrivalSec, busDepartureSec);
-  
-  const alternatives = transferChoices.filter((o) => o.id !== option.id);
+    const aBus = departureSec(a.bus);
+    const bBus = departureSec(b.bus);
 
-  return (
-    <div style={styles.liveContainer}>
-      {isRisky && (
-        <div style={styles.liveAlert}>
-          <AlertTriangle size={24} />
-          <div>
-            <strong>Zagrożona przesiadka!</strong>
-            <div>Pojazd ucieknie lub masz ujemny bufor. Zobacz alternatywy poniżej.</div>
-          </div>
-        </div>
-      )}
+    if (aBus !== bBus) return aBus - bBus;
 
-      <div style={{ ...styles.liveTimeline, borderLeftColor: riskC }}>
-        <div style={styles.liveStep}>
-          <div style={styles.liveStepDot}>🚂</div>
-          <div style={styles.liveStepContent}>
-            <div style={styles.liveStepTitle}>WKD do {option.train.headsign}</div>
-            <div style={styles.liveStepTime}>
-              Odjazd: <strong>{trainTime}</strong> {formatDelay(option.train.delay_sec)}
-            </div>
-            <div style={styles.liveStepTime}>Aktualna pozycja: <strong>{livePosition}</strong></div>
-            <div style={styles.liveStepTime}>
-              Dojazd na przesiadkę: <strong>{arrivalTime}</strong>
-            </div>
-            <div style={styles.liveStopsRow}>
-              Kolejne przystanki:
-              <span style={styles.stopChip}>{option.train.stop_id}</span>
-              <span style={styles.stopArrow}>→</span>
-              <span style={styles.stopChip}>{option.train_transfer?.stop_id ?? 'przesiadka'}</span>
-              <span style={styles.stopArrow}>→</span>
-              <span style={styles.stopChip}>{option.bus.stop_id}</span>
-            </div>
-          </div>
-        </div>
-
-        <div style={styles.liveStep}>
-          <div style={styles.liveStepDot}>🚶</div>
-          <div style={styles.liveStepContent}>
-            <div style={styles.liveStepTitle}>Przejście pieszo</div>
-            <div style={styles.liveStepTime}>
-              Planowany czas dojścia: {Math.floor(option.walk_sec / 60)} min
-            </div>
-            {option.bus_stop_variant && (
-              <div style={styles.liveVariantBadge}>
-                Kieruj się na wariant: {option.bus_stop_variant}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div style={styles.liveStep}>
-          <div style={styles.liveStepDot}>🚌</div>
-          <div style={styles.liveStepContent}>
-            <div style={styles.liveStepTitle}>ZTM Linia {option.bus.route_id} do {option.bus.headsign}</div>
-            <div style={styles.liveStepTime}>
-              Odjazd: <strong>{busTime}</strong> {formatDelay(option.bus.delay_sec)}
-            </div>
-            {alternatives.length > 0 && (
-              <div style={styles.transferAlternativesInline}>
-                <span style={styles.transferAlternativesLabel}>Alternatywy przesiadki:</span>
-                <div style={styles.transferAlternativesList}>
-                  {alternatives.map((alt) => (
-                    <button
-                      key={alt.id}
-                      style={styles.transferAlternativeChip}
-                      onClick={() => onSwitchAlternative(alt.id)}
-                    >
-                      {secToHHMM(departureSec(alt.bus))} • {alt.bus.stop_id ?? 'przesiadka'} • {alt.bus.route_id}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div style={{ ...styles.liveBuffer, color: riskC }}>
-              Pozostało na przesiadkę: {formatBuffer(option.buffer_sec)}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div style={styles.liveTripPanel}>
-        <div style={styles.liveTripHeader}>
-          <MapPin size={16} /> Przebieg kursu i opóźnienia po trasie
-        </div>
-        {tripLoading && <div style={styles.liveTripMuted}>Ładowanie przebiegu trasy…</div>}
-        {!tripLoading && !tripDetails && (
-          <div style={styles.liveTripMuted}>Brak szczegółów trasy dla tego kursu.</div>
-        )}
-        {!tripLoading && tripDetails && (
-          <>
-            <div style={styles.liveTripMeta}>
-              Punkty geometrii: <strong>{tripDetails.shape.coordinates.length}</strong> •
-              Przystanki: <strong>{tripDetails.stops.length}</strong>
-            </div>
-            <div style={styles.tripStopsList}>
-              {tripDetails.stops.slice(0, 8).map((stop) => (
-                <div key={`${stop.stop_id}-${stop.seq}`} style={styles.tripStopItem}>
-                  <span style={styles.tripStopName}>{stop.stop_name}</span>
-                  <span style={styles.tripStopTime}>
-                    {secToHHMM(stop.estimated_live_sec ?? stop.scheduled_sec)} {formatDelay(stop.delay_sec)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </div>
-
-      <div style={styles.liveMonitorInfo}>
-        Monitoring live: opóźnienia WKD/ZTM i lista przesiadek odświeżają się automatycznie co 25 sekund.
-      </div>
-
-    </div>
-  );
+    return b.buffer_sec - a.buffer_sec;
+  });
 }
-
-function AlternativeCard({ option, isSelected, onClick }: { option: TransferOption; isSelected: boolean; onClick: () => void; }) {
-  const trainTime = secToHHMM(option.train.live_sec ?? option.train.scheduled_sec);
-  const busTime = secToHHMM(option.bus.live_sec ?? option.bus.scheduled_sec);
-  const plannedBusTime = secToHHMM(option.bus.scheduled_sec);
-  const riskC = riskColor(option.risk);
-
-  return (
-    <button
-      style={{
-        ...styles.altCard,
-        borderColor: isSelected ? riskC : '#e5e7eb',
-        backgroundColor: isSelected ? riskC + '10' : 'white'
-      }}
-      onClick={onClick}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-          <span style={{ fontWeight: 600 }}>🚂 {trainTime}</span>
-          <span style={{ color: '#6b7280' }}>→</span>
-          <span style={{ fontWeight: 600 }}>🚌 {option.bus.route_id} {busTime}</span>
-          <span style={{ color: '#6b7280', fontSize: 12 }}>plan: {plannedBusTime}</span>
-          <span style={{ fontSize: 12, color: option.bus.delay_sec && option.bus.delay_sec > 0 ? '#dc2626' : '#16a34a' }}>{formatDelay(option.bus.delay_sec)}</span>
-          {option.bus_stop_variant && (
-            <span style={styles.variantBadge}>Wariant {option.bus_stop_variant}</span>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <span style={{ color: riskC, fontWeight: 600 }}>{formatBuffer(option.buffer_sec)}</span>
-          <span style={{ color: riskC, fontSize: 20 }}>
-            {option.risk === 'LOW' ? '🟢' : option.risk === 'MED' ? '🟡' : '🔴'}
-          </span>
-        </div>
-      </div>
-    </button>
-  );
-}
-
 
 function nowSecLocal(): number {
   const now = new Date();
   return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
 }
 
-function getLiveVehiclePositionLabel(
-  nowSec: number,
-  trainDepartureSec: number,
-  transferArrivalSec: number,
-  busDepartureSec: number
-): string {
-  if (nowSec < trainDepartureSec) return 'przed odjazdem (na stacji początkowej)';
-  if (nowSec < transferArrivalSec) return 'w drodze do przesiadki';
-  if (nowSec < busDepartureSec) return 'na przesiadce / dojście do autobusu';
-  return 'po przesiadce (autobus w trasie)';
-}
-
 const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '0 0 32px' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 },
-  profileName: { margin: 0, fontSize: 22, fontWeight: 700 },
-  lastRefresh: { fontSize: 12, color: '#9ca3af' },
-  liveStatus: { display: 'flex', gap: 8, fontSize: 13, color: '#374151' },
-  btnIcon: {
-    background: 'white', border: '1px solid #e5e7eb', borderRadius: 8,
-    padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#374151'
-  },
-  btnDanger: {
-    background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 8,
-    padding: '6px 12px', cursor: 'pointer', display: 'flex', alignItems: 'center', color: '#dc2626', fontWeight: 600
-  },
-  spinning: { animation: 'spin 1s linear infinite' },
-  btnPrimary: {
-    background: '#2563eb', color: 'white', border: 'none', borderRadius: 8,
-    padding: '10px 20px', cursor: 'pointer', fontWeight: 600, fontSize: 15
-  },
-  errorBanner: {
-    background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8,
-    padding: '10px 14px', color: '#dc2626', marginBottom: 16,
-    display: 'flex', gap: 8, alignItems: 'center'
-  },
-  emptyState: {
-    textAlign: 'center', padding: '48px 0', display: 'flex',
-    flexDirection: 'column', alignItems: 'center', gap: 16
-  },
-  bestCard: {
-    border: '2px solid', borderRadius: 12, padding: 20,
-    background: 'white', marginBottom: 20, boxShadow: '0 2px 8px rgba(0,0,0,0.08)'
-  },
-  transportRow: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 },
-  transportIcon: { fontSize: 28 },
-  transportInfo: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, flex: 1 },
-  lineLabel: {
-    background: '#1d4ed8', color: 'white', borderRadius: 6,
-    padding: '2px 8px', fontWeight: 700, fontSize: 14
-  },
-  timeMain: { fontSize: 26, fontWeight: 800, color: '#111827' },
-  delayBadge: { fontWeight: 700, fontSize: 15 },
-  noLive: { color: '#d97706', fontSize: 13, fontWeight: 500 },
-  headsign: { color: '#6b7280', fontSize: 14, width: '100%', marginTop: 2 },
-  arrivalRow: {
-    color: '#374151', fontSize: 14, paddingLeft: 40, marginBottom: 4,
-    display: 'flex', alignItems: 'center', gap: 6
-  },
-  walkRow: {
-    color: '#6b7280', fontSize: 13, paddingLeft: 40, marginBottom: 10,
-    borderLeft: '2px dashed #d1d5db', marginLeft: 19, paddingBottom: 6
-  },
-  variantBanner: {
-    background: '#1d4ed8', color: 'white', borderRadius: 8,
-    padding: '10px 16px', fontSize: 16, fontWeight: 600,
-    marginBottom: 12, textAlign: 'center'
-  },
-  stopIdNote: { fontSize: 12, opacity: 0.8 },
-  bufferRow: {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    borderRadius: 8, padding: '12px 16px', marginTop: 8
-  },
-  bufferTime: { fontSize: 16, fontWeight: 600, color: '#374151' },
-  btnStartLive: {
-    marginTop: 16, width: '100%', background: '#10b981', color: 'white',
-    border: 'none', borderRadius: 8, padding: '14px 20px', cursor: 'pointer',
-    fontWeight: 700, fontSize: 16, display: 'flex', justifyContent: 'center',
-    alignItems: 'center', gap: 8, transition: 'background 0.2s'
-  },
-  warningsSection: { marginTop: 10, paddingTop: 10, borderTop: '1px solid #f3f4f6' },
-  warningItem: {
-    display: 'flex', alignItems: 'center', gap: 6,
-    color: '#d97706', fontSize: 13, marginBottom: 4
-  },
-  alternativesSection: { marginTop: 8 },
-  sectionTitle: { fontSize: 16, fontWeight: 600, color: '#374151', marginBottom: 10 },
-  alternativesList: { display: 'flex', flexDirection: 'column', gap: 8 },
-  altCard: {
-    border: '1.5px solid', borderRadius: 10, padding: '12px 16px',
-    cursor: 'pointer', width: '100%', textAlign: 'left', transition: 'all 0.15s'
-  },
-  variantBadge: {
-    background: '#dbeafe', color: '#1d4ed8', borderRadius: 6,
-    padding: '2px 8px', fontSize: 12, fontWeight: 700
-  },
-  liveContainer: {
-    background: 'white', borderRadius: 12, padding: 20, boxShadow: '0 4px 12px rgba(0,0,0,0.1)'
-  },
-  liveAlert: {
-    background: '#fef2f2', color: '#dc2626', border: '2px solid #fca5a5',
-    borderRadius: 8, padding: '12px 16px', marginBottom: 20,
-    display: 'flex', alignItems: 'center', gap: 12, fontSize: 15
-  },
-  liveTimeline: {
-    borderLeft: '4px solid', marginLeft: 16, paddingLeft: 24, display: 'flex', flexDirection: 'column', gap: 24
-  },
-  liveStep: { position: 'relative' },
-  liveStepDot: {
-    position: 'absolute', left: -44, top: 0, width: 36, height: 36,
-    background: 'white', border: '2px solid #e5e7eb', borderRadius: '50%',
-    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, zIndex: 2
-  },
-  liveStepContent: { background: '#f9fafb', padding: '12px 16px', borderRadius: 8, border: '1px solid #e5e7eb' },
-  liveStepTitle: { fontWeight: 700, fontSize: 16, color: '#111827', marginBottom: 4 },
-  liveStepTime: { fontSize: 14, color: '#4b5563', marginBottom: 2 },
-  liveStopsRow: { marginTop: 8, fontSize: 13, color: '#374151', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
-  stopChip: { background: '#e5e7eb', borderRadius: 999, padding: '2px 8px', fontWeight: 600, fontSize: 12 },
-  stopArrow: { color: '#9ca3af' },
-  liveVariantBadge: {
-    display: 'inline-block', marginTop: 8, background: '#1d4ed8', color: 'white',
-    borderRadius: 6, padding: '4px 8px', fontWeight: 600, fontSize: 13
-  },
-  liveBuffer: { marginTop: 8, fontWeight: 700, fontSize: 15 },
-  transferAlternativesInline: {
-    marginTop: 8,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 8,
-  },
-  transferAlternativesLabel: {
-    fontSize: 13,
-    fontWeight: 700,
-    color: '#374151',
-  },
-  transferAlternativesList: {
-    display: 'flex',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  transferAlternativeChip: {
-    border: '1px solid #c7d2fe',
-    background: '#eef2ff',
-    color: '#1e40af',
-    borderRadius: 999,
-    padding: '4px 10px',
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  liveTripPanel: {
-    marginTop: 14,
-    border: '1px solid #dbeafe',
-    background: '#eff6ff',
-    borderRadius: 10,
-    padding: 12,
-  },
-  liveTripHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    fontWeight: 700,
-    color: '#1e40af',
-    marginBottom: 8,
-  },
-  liveTripMeta: {
-    fontSize: 13,
-    color: '#1f2937',
-    marginBottom: 8,
-  },
-  liveTripMuted: {
-    fontSize: 13,
-    color: '#64748b',
-  },
-  tripStopsList: {
-    display: 'grid',
-    gap: 6,
-  },
-  tripStopItem: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    fontSize: 13,
-    color: '#1f2937',
-    padding: '6px 8px',
-    background: 'white',
-    borderRadius: 6,
-  },
-  tripStopName: {
-    fontWeight: 600,
-    marginRight: 12,
-  },
-  tripStopTime: {
-    color: '#334155',
-  },
-  liveMonitorInfo: {
-    marginTop: 16,
-    padding: '10px 12px',
-    borderRadius: 8,
-    border: '1px solid #bfdbfe',
-    background: '#eff6ff',
-    color: '#1d4ed8',
-    fontSize: 13,
-    fontWeight: 600,
-  }
+  page: { paddingBottom: 32 },
+  topBar: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', marginBottom: 8 },
+  pageTitle: { margin: 0, fontSize: 28, color: '#0f172a' },
+  subtitle: { margin: '6px 0 0', color: '#475569' },
+  topActions: { display: 'flex', gap: 8, alignItems: 'center' },
+  liveSources: { display: 'flex', gap: 8, fontSize: 13, color: '#334155' },
+  iconBtn: { border: '1px solid #cbd5e1', borderRadius: 8, background: 'white', padding: 8, cursor: 'pointer', display: 'flex' },
+  refreshText: { margin: '0 0 12px', color: '#64748b', fontSize: 13 },
+  errorBanner: { display: 'flex', gap: 8, alignItems: 'center', background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', borderRadius: 8, padding: '10px 12px', marginBottom: 12 },
+  layout: { display: 'grid', gridTemplateColumns: '360px 1fr', gap: 16, alignItems: 'start' },
+  leftPane: { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12, position: 'sticky', top: 84 },
+  rightPane: { minHeight: 300 },
+  sectionTitle: { margin: 0, fontSize: 18, color: '#0f172a' },
+  departureCard: { width: '100%', textAlign: 'left', border: '1px solid', borderRadius: 10, padding: 12, marginTop: 10, cursor: 'pointer' },
+  rowBetween: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
+  metaRow: { color: '#475569', marginTop: 6, fontSize: 14 },
+  detailsPanel: { background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16 },
+  infoGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 },
+  infoBox: { display: 'flex', gap: 10, border: '1px solid #e2e8f0', borderRadius: 10, padding: 12, alignItems: 'flex-start' },
+  infoLabel: { fontSize: 12, color: '#64748b', marginBottom: 3 },
+  infoSub: { color: '#475569', marginTop: 4, fontSize: 13 },
+  subsection: { marginTop: 18 },
+  subTitle: { margin: '0 0 10px', display: 'flex', alignItems: 'center', gap: 6, color: '#0f172a' },
+  muted: { color: '#64748b', margin: 0 },
+  stopsList: { display: 'grid', gap: 8, maxHeight: 340, overflowY: 'auto', paddingRight: 4 },
+  stopRow: { border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, display: 'flex', justifyContent: 'space-between', gap: 10 },
+  stopTimes: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', color: '#334155', fontSize: 13 },
+  transferList: { display: 'grid', gap: 8 },
+  transferRow: { border: '1px solid #e2e8f0', borderLeft: '4px solid', borderRadius: 8, padding: 10 },
+  emptyCard: { background: 'white', border: '1px dashed #cbd5e1', borderRadius: 10, padding: 16, color: '#64748b', marginTop: 10 },
+  emptyState: { textAlign: 'center', padding: '52px 0', display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center' },
+  primaryBtn: { background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontWeight: 600 },
 };
