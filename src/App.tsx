@@ -175,7 +175,7 @@ const styles: Record<string, React.CSSProperties> = {
   header: {
     background: 'white', borderBottom: '1px solid #e5e7eb', padding: '12px 24px',
     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    position: 'sticky', top: 0, zIndex: 100, boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+    position: 'sticky', top: 0, zIndex: 1200, boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
   },
   headerMobile: { padding: '10px 12px', flexWrap: 'wrap', gap: 8 },
   logo: { display: 'flex', alignItems: 'center', gap: 8 },
