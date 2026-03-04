@@ -68,7 +68,7 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
       .map(([key, options]) => ({
         key,
         representative: chooseRepresentativeOption(options),
-        options: sortTransfersByFeasibility(options),
+        options: sortTransfersByClosestDeparture(options),
       }))
       .filter((group) => departureSec(group.representative.train) >= now - PAST_WINDOW_SEC)
       .sort((a, b) => departureSec(a.representative.train) - departureSec(b.representative.train));
@@ -162,12 +162,14 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
     );
   }
 
+  const ongoingCount = groupedDepartures.filter((group) => departureSec(group.representative.train) < nowSecLocal()).length;
+
   return (
     <div style={styles.page}>
       <div style={{ ...styles.topBar, ...(isMobile ? styles.topBarMobile : {}) }}>
         <div>
           <h2 style={{ ...styles.pageTitle, ...(isMobile ? styles.pageTitleMobile : {}) }}>{activeProfile.name}</h2>
-          <p style={{ ...styles.subtitle, ...(isMobile ? styles.subtitleMobile : {}) }}>Najbliższe odjazdy + odjazdy sprzed maksymalnie 30 minut.</p>
+          <p style={{ ...styles.subtitle, ...(isMobile ? styles.subtitleMobile : {}) }}>Widok live: odjazdy startowe, podróż w toku i dynamiczne przesiadki.</p>
         </div>
         <div style={{ ...styles.topActions, ...(isMobile ? styles.topActionsMobile : {}) }}>
           {result && (
@@ -185,12 +187,17 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
         </div>
       </div>
 
-      {lastRefresh && <p style={styles.refreshText}>Ostatnie odświeżenie: {lastRefresh.toLocaleTimeString('pl-PL')}</p>}
+      <div style={{ ...styles.kpiRow, ...(isMobile ? styles.kpiRowMobile : {}) }}>
+        <KpiCard label="Odjazdy w oknie" value={groupedDepartures.length.toString()} hint="-30 min do przyszłych" />
+        <KpiCard label="Kursy w toku" value={ongoingCount.toString()} hint="mogłeś już być w pojeździe" />
+        <KpiCard label="Live update" value="co 25s" hint={lastRefresh ? `ostatnio: ${lastRefresh.toLocaleTimeString('pl-PL')}` : 'oczekiwanie'} />
+      </div>
+
       {error && <div style={styles.errorBanner}><AlertTriangle size={14} /> {error}</div>}
 
       <div style={{ ...styles.layout, ...(isMobile ? styles.layoutMobile : {}) }}>
         <section style={{ ...styles.leftPane, ...(isMobile ? styles.leftPaneMobile : {}) }}>
-          <h3 style={styles.sectionTitle}>Odjazdy z przystanku początkowego</h3>
+          <h3 style={styles.sectionTitle}>1) Start: najbliższe i trwające odjazdy</h3>
           {groupedDepartures.length === 0 ? (
             <div style={styles.emptyCard}>Brak odjazdów w oknie czasowym.</div>
           ) : (
@@ -219,6 +226,16 @@ export function Dashboard({ activeProfile, onGoToSettings }: Props) {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+function KpiCard({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return (
+    <div style={styles.kpiCard}>
+      <div style={styles.kpiLabel}>{label}</div>
+      <div style={styles.kpiValue}>{value}</div>
+      <div style={styles.kpiHint}>{hint}</div>
     </div>
   );
 }
@@ -266,7 +283,7 @@ function useIsMobile() {
 function DepartureCard({ option, selected, onClick }: { option: TransferOption; selected: boolean; onClick: () => void }) {
   const dep = departureSec(option.train);
   const diffMin = Math.round((dep - nowSecLocal()) / 60);
-  const stateLabel = diffMin < 0 ? `${Math.abs(diffMin)} min temu` : `za ${diffMin} min`;
+  const isOngoing = diffMin < 0;
 
   return (
     <button
@@ -279,10 +296,12 @@ function DepartureCard({ option, selected, onClick }: { option: TransferOption; 
     >
       <div style={styles.rowBetween}>
         <strong>🚂 {secToHHMM(dep)}</strong>
-        <span style={{ color: diffMin < 0 ? '#b45309' : '#166534', fontWeight: 700 }}>{stateLabel}</span>
+        <span style={{ ...styles.stateBadge, background: isOngoing ? '#fef3c7' : '#dcfce7', color: isOngoing ? '#92400e' : '#166534' }}>
+          {isOngoing ? `TRWA • ${Math.abs(diffMin)} min temu` : `za ${diffMin} min`}
+        </span>
       </div>
       <div style={styles.metaRow}>Kierunek: {option.train.headsign}</div>
-      <div style={styles.metaRow}>Linia przesiadkowa (najlepsza): {option.bus.route_id} o {secToHHMM(departureSec(option.bus))}</div>
+      <div style={styles.metaRow}>Najbliższa przesiadka: {option.bus.route_id} • {secToHHMM(departureSec(option.bus))}</div>
     </button>
   );
 }
@@ -303,12 +322,12 @@ function DepartureDetailsPanel({
   const currentPositionLabel = getCurrentVehiclePositionLabel(representative, tripDetails);
   const transferStopId = representative.train_transfer?.stop_id;
   const trainStopsToTransfer = getStopsUntilTransfer(tripDetails, transferStopId);
-
+  const upcomingStops = getUpcomingStops(tripDetails, 6);
   const mapData = buildMapData(representative, tripDetails, options, busTripsById);
 
   return (
     <div style={styles.detailsPanel}>
-      <h3 style={styles.sectionTitle}>Szczegóły odjazdu {secToHHMM(departureSec(representative.train))}</h3>
+      <h3 style={styles.sectionTitle}>2) Podróż live: {secToHHMM(departureSec(representative.train))}</h3>
 
       <div style={styles.infoGrid}>
         <div style={styles.infoBox}>
@@ -325,33 +344,35 @@ function DepartureDetailsPanel({
           <div>
             <div style={styles.infoLabel}>Pozycja pojazdu</div>
             <strong>{currentPositionLabel}</strong>
-            <div style={styles.infoSub}>Aktualizowane na podstawie live/schedule.</div>
+            <div style={styles.infoSub}>Wyliczane live względem kolejnych przystanków.</div>
           </div>
         </div>
       </div>
 
       <div style={styles.subsection}>
-        <h4 style={styles.subTitle}><MapPin size={14} /> Mapa pojazdów (OpenStreetMap)</h4>
+        <h4 style={styles.subTitle}><MapPin size={14} /> Mapa live</h4>
         <VehicleMap mapData={mapData} />
       </div>
 
       <div style={styles.subsection}>
-        <h4 style={styles.subTitle}><MapPin size={14} /> Rozkład WKD do planowanej przesiadki</h4>
+        <h4 style={styles.subTitle}><MapPin size={14} /> Kolejne przystanki i czas dojazdu</h4>
         {tripLoading && <p style={styles.muted}>Ładowanie trasy WKD…</p>}
         {!tripLoading && !tripDetails && <p style={styles.muted}>Brak szczegółów trasy dla tego kursu.</p>}
         {!tripLoading && tripDetails && (
           <div style={styles.stopsList}>
-            {trainStopsToTransfer.map((stop) => (
-              <StopRow key={`${stop.stop_id}-${stop.seq}`} stop={stop} />
+            {upcomingStops.length > 0 ? upcomingStops.map((stop) => (
+              <StopRow key={`${stop.stop_id}-${stop.seq}`} stop={stop} showEta />
+            )) : trainStopsToTransfer.map((stop) => (
+              <StopRow key={`${stop.stop_id}-${stop.seq}`} stop={stop} showEta />
             ))}
           </div>
         )}
       </div>
 
       <div style={styles.subsection}>
-        <h4 style={styles.subTitle}>Przesiadki (od najszybszej możliwej)</h4>
+        <h4 style={styles.subTitle}>3) Przesiadki — najbliższe odjazdy (live)</h4>
         <div style={styles.transferList}>
-          {options.map((option) => {
+          {sortTransfersByClosestDeparture(options).map((option) => {
             const risk = riskColor(option.risk);
             const busTrip = option.bus.trip_id ? busTripsById[option.bus.trip_id] : null;
             const boardingStop = busTrip ? busTrip.stops.find((stop) => stop.stop_id === option.bus.stop_id) : null;
@@ -363,16 +384,14 @@ function DepartureDetailsPanel({
                   <strong>🚌 {option.bus.route_id} • {secToHHMM(departureSec(option.bus))}</strong>
                   <span style={{ color: risk, fontWeight: 700 }}>{riskLabel(option.risk)}</span>
                 </div>
+                <div style={styles.metaRow}>Przystanek wejścia: <strong>{boardingStop?.stop_name ?? option.bus.stop_id}</strong></div>
                 <div style={styles.metaRow}>Kierunek: {option.bus.headsign}</div>
+                <div style={styles.metaRow}>Odjazd live: {formatPlannedWithDelay(option.bus.scheduled_sec, option.bus.delay_sec)}</div>
                 <div style={styles.metaRow}>Bufor: {formatBuffer(option.buffer_sec)} • Dojście: {Math.round(option.walk_sec / 60)} min</div>
-                <div style={styles.metaRow}>Odjazd: {formatPlannedWithDelay(option.bus.scheduled_sec, option.bus.delay_sec)}</div>
-                <div style={styles.transferHint}>
-                  <strong>Przesiadka:</strong> wsiądź w <strong>{option.bus.route_id}</strong> na przystanku <strong>{boardingStop?.stop_name ?? option.bus.stop_id}</strong>.
-                </div>
                 {busStopsFromBoarding.length > 0 && (
                   <div style={styles.innerStopsList}>
-                    {busStopsFromBoarding.map((stop) => (
-                      <StopRow key={`${option.id}-${stop.stop_id}-${stop.seq}`} stop={stop} compact />
+                    {busStopsFromBoarding.slice(0, 4).map((stop) => (
+                      <StopRow key={`${option.id}-${stop.stop_id}-${stop.seq}`} stop={stop} compact showEta />
                     ))}
                   </div>
                 )}
@@ -409,7 +428,10 @@ function VehicleMap({ mapData }: { mapData: MapData }) {
   );
 }
 
-function StopRow({ stop, compact = false }: { stop: TripStop; compact?: boolean }) {
+function StopRow({ stop, compact = false, showEta = false }: { stop: TripStop; compact?: boolean; showEta?: boolean }) {
+  const etaSec = (stop.estimated_live_sec ?? stop.scheduled_sec) - nowSecLocal();
+  const etaLabel = etaSec <= 0 ? 'teraz' : `za ${Math.round(etaSec / 60)} min`;
+
   return (
     <div style={{ ...styles.stopRow, padding: compact ? 8 : 10 }}>
       <div>
@@ -417,6 +439,7 @@ function StopRow({ stop, compact = false }: { stop: TripStop; compact?: boolean 
       </div>
       <div style={styles.stopTimes}>
         <span>{formatPlannedWithDelay(stop.scheduled_sec, stop.delay_sec)}</span>
+        {showEta && <span style={styles.etaLabel}>{etaLabel}</span>}
       </div>
     </div>
   );
@@ -436,6 +459,15 @@ function getStopsUntilTransfer(tripDetails: TripDetails | null, transferStopId?:
   if (!transferStop) return tripDetails.stops;
 
   return tripDetails.stops.filter((stop) => stop.seq <= transferStop.seq);
+}
+
+function getUpcomingStops(tripDetails: TripDetails | null, limit: number): TripStop[] {
+  if (!tripDetails) return [];
+  const now = nowSecLocal();
+  return [...tripDetails.stops]
+    .sort((a, b) => a.seq - b.seq)
+    .filter((stop) => (stop.estimated_live_sec ?? stop.scheduled_sec) >= now)
+    .slice(0, limit);
 }
 
 function getStopsFromBoarding(tripDetails: TripDetails, boardingStopId: string): TripStop[] {
@@ -578,21 +610,19 @@ function getFirstRideKey(option: TransferOption): string {
 }
 
 function chooseRepresentativeOption(options: TransferOption[]): TransferOption {
-  return sortTransfersByFeasibility(options)[0];
+  return sortTransfersByClosestDeparture(options)[0];
 }
 
-function sortTransfersByFeasibility(options: TransferOption[]): TransferOption[] {
+function sortTransfersByClosestDeparture(options: TransferOption[]): TransferOption[] {
+  const now = nowSecLocal();
   return [...options].sort((a, b) => {
-    const aReady = a.ready_sec;
-    const bReady = b.ready_sec;
+    const aDep = departureSec(a.bus);
+    const bDep = departureSec(b.bus);
+    const aPast = aDep < now;
+    const bPast = bDep < now;
 
-    if (aReady !== bReady) return aReady - bReady;
-
-    const aBus = departureSec(a.bus);
-    const bBus = departureSec(b.bus);
-
-    if (aBus !== bBus) return aBus - bBus;
-
+    if (aPast !== bPast) return aPast ? 1 : -1;
+    if (aDep !== bDep) return aDep - bDep;
     return b.buffer_sec - a.buffer_sec;
   });
 }
@@ -614,16 +644,22 @@ const styles: Record<string, React.CSSProperties> = {
   topActionsMobile: { width: '100%', justifyContent: 'space-between' },
   liveSources: { display: 'flex', gap: 8, fontSize: 13, color: '#334155' },
   iconBtn: { border: '1px solid #cbd5e1', borderRadius: 8, background: 'white', padding: 8, cursor: 'pointer', display: 'flex' },
-  refreshText: { margin: '0 0 12px', color: '#64748b', fontSize: 13 },
+  kpiRow: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10, marginBottom: 12 },
+  kpiRowMobile: { gridTemplateColumns: '1fr' },
+  kpiCard: { background: '#ffffff', border: '1px solid #dbeafe', borderRadius: 12, padding: 12 },
+  kpiLabel: { fontSize: 12, color: '#334155' },
+  kpiValue: { fontSize: 26, fontWeight: 800, color: '#1d4ed8' },
+  kpiHint: { fontSize: 12, color: '#64748b' },
   errorBanner: { display: 'flex', gap: 8, alignItems: 'center', background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', borderRadius: 8, padding: '10px 12px', marginBottom: 12 },
   layout: { display: 'grid', gridTemplateColumns: '360px 1fr', gap: 16, alignItems: 'start' },
   layoutMobile: { gridTemplateColumns: '1fr' },
-  leftPane: { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: 12, position: 'sticky', top: 84 },
+  leftPane: { background: '#f8fafc', border: '1px solid #dbeafe', borderRadius: 12, padding: 12, position: 'sticky', top: 84 },
   leftPaneMobile: { position: 'static', top: 'auto' },
   rightPane: { minHeight: 300 },
   rightPaneMobile: { minHeight: 0 },
   sectionTitle: { margin: 0, fontSize: 18, color: '#0f172a' },
   departureCard: { width: '100%', textAlign: 'left', border: '1px solid', borderRadius: 10, padding: 12, marginTop: 10, cursor: 'pointer' },
+  stateBadge: { fontWeight: 700, fontSize: 12, borderRadius: 999, padding: '3px 8px' },
   rowBetween: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
   metaRow: { color: '#475569', marginTop: 6, fontSize: 14 },
   detailsPanel: { background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16 },
@@ -634,13 +670,13 @@ const styles: Record<string, React.CSSProperties> = {
   subsection: { marginTop: 18 },
   subTitle: { margin: '0 0 10px', display: 'flex', alignItems: 'center', gap: 6, color: '#0f172a' },
   muted: { color: '#64748b', margin: 0 },
-  stopsList: { display: 'grid', gap: 8, maxHeight: 300, overflowY: 'auto', paddingRight: 4 },
+  stopsList: { display: 'grid', gap: 8, maxHeight: 320, overflowY: 'auto', paddingRight: 4 },
   innerStopsList: { display: 'grid', gap: 6, marginTop: 8, maxHeight: 220, overflowY: 'auto' },
   stopRow: { border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, display: 'flex', justifyContent: 'space-between', gap: 10 },
   stopTimes: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', color: '#334155', fontSize: 13 },
+  etaLabel: { color: '#1d4ed8', fontWeight: 700, fontSize: 12 },
   transferList: { display: 'grid', gap: 8 },
   transferRow: { border: '1px solid #e2e8f0', borderLeft: '4px solid', borderRadius: 8, padding: 10, background: '#f8fafc' },
-  transferHint: { marginTop: 8, fontSize: 14, color: '#0f172a', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '8px 10px' },
   mapWrap: { border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' },
   mapCanvas: { width: '100%', height: 260 },
   emptyCard: { background: 'white', border: '1px dashed #cbd5e1', borderRadius: 10, padding: 16, color: '#64748b', marginTop: 10 },
