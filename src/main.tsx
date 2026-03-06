@@ -57,6 +57,8 @@ if (!domain || !clientId) {
       <Auth0Provider
         domain={domain}
         clientId={clientId}
+        cacheLocation="localstorage"
+        useRefreshTokens
         authorizationParams={{
           redirect_uri: window.location.origin,
           ...(audience ? { audience } : {}),
